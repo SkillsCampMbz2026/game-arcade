@@ -75,6 +75,11 @@ bigger one, with the clock running across the whole run. Only finishing every
 maze completes the course. Sprint is 3 mazes, Standard 5, Marathon 8, ramping
 from 10x10 up to 38x38.
 
+Brick walls, tiled floors and the sky are painted onto 2D canvases at load
+time and used as textures, so there are still no image files to download. The
+maze is open to the sky rather than roofed, lit by a hemisphere light and a
+raking sun.
+
 Maze generation is a recursive backtracker, which produces a *perfect* maze:
 every square reachable, exactly one route between any two points, no loops.
 

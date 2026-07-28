@@ -485,7 +485,7 @@ h1 {
 .dpad__btn--down  { grid-area: 2 / 2; }
 .dpad__btn--right { grid-area: 2 / 3; }
 
-/* First-person viewport with the minimap tucked into a corner */
+/* First-person viewport */
 .viewport {
   position: relative;
   width: 100%;
@@ -498,16 +498,14 @@ h1 {
 
 .viewport canvas { display: block; }
 
-.minimap {
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 128px;
-  height: auto;
-  border-radius: 8px;
-  border: 1px solid rgba(148, 163, 184, 0.3);
-  image-rendering: pixelated;
+.viewport__note {
+  padding: 28px 20px;
+  color: var(--muted);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  text-align: center;
 }
+
 
 .holdrow {
   display: flex;
@@ -582,11 +580,6 @@ h1 {
   object-fit: cover;
 }
 
-.viewport:fullscreen .minimap {
-  width: 190px;
-  top: 18px;
-  right: 18px;
-}
 
 /* Whole-page fullscreen, used by every game except the maze */
 html:fullscreen {

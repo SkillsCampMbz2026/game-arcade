@@ -27,8 +27,10 @@ const WALK_SPEED = 3.1;        // cells per second
 const TURN_SPEED = 2.4;        // radians per second
 const MOUSE_SENSITIVITY = 0.0026;
 const MAX_PITCH = 0.9;         // radians you can look up or down
-const WALL_HEIGHT = 2.1;
+const WALL_HEIGHT = 2.4;
 const EYE_HEIGHT = 0.95;
+// Not FIELD_OF_VIEW: racing.js already declares that at global scope.
+const MAZE_FOV = 95;           // degrees; wide enough to feel first-person
 
 /* ---------- maze generation ---------- */
 
@@ -186,6 +188,105 @@ function loadThree() {
   return threeLoading;
 }
 
+/* Textures, painted onto 2D canvases at load time — no image files, so the
+   arcade stays a plain static page. Built once and shared by every level. */
+let textures = null;
+
+function paintCanvas(size, draw) {
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  draw(canvas.getContext('2d'), size);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.anisotropy = 4;
+  return texture;
+}
+
+function makeTextures() {
+  if (textures) return textures;
+
+  // Light grey brick. Mortar sits close to the brick tone so the courses read
+  // as texture rather than as a loud grid.
+  const brick = paintCanvas(256, (g, size) => {
+    const rows = 6;
+    const brickH = size / rows;
+    g.fillStyle = '#9ba1a8';                       // mortar
+    g.fillRect(0, 0, size, size);
+
+    for (let row = 0; row < rows; row++) {
+      const offset = (row % 2) * 0.5;
+      for (let i = -1; i < 5; i++) {
+        const x = (i + offset) * (size / 4);
+        const y = row * brickH;
+        const shade = 198 + ((row * 7 + i * 13) % 7) * 6;   // 198..234
+        g.fillStyle = `rgb(${shade}, ${shade}, ${shade + 3})`;
+        g.fillRect(x + 2, y + 2, size / 4 - 4, brickH - 4);
+
+        g.fillStyle = 'rgba(255, 255, 255, 0.16)';          // top-edge catch
+        g.fillRect(x + 2, y + 2, size / 4 - 4, 2);
+      }
+    }
+  });
+
+  // Flat capstone for the tops of the walls, which you see now the ceiling is
+  // gone.
+  const cap = paintCanvas(64, (g, size) => {
+    g.fillStyle = '#aeb4ba';
+    g.fillRect(0, 0, size, size);
+    g.fillStyle = 'rgba(90, 98, 106, 0.35)';
+    for (let i = 0; i < 40; i++) {
+      const n = (i * 2654435761) % 4096;
+      g.fillRect((n % size), ((n >> 6) % size), 3, 2);
+    }
+  });
+
+  // Dark grey floor tiles, one tile per grid square.
+  const floor = paintCanvas(256, (g, size) => {
+    const half = size / 2;
+    g.fillStyle = '#20242b';                       // grout
+    g.fillRect(0, 0, size, size);
+    for (let ty = 0; ty < 2; ty++) {
+      for (let tx = 0; tx < 2; tx++) {
+        const shade = 52 + ((tx + ty * 2) % 3) * 5;
+        g.fillStyle = `rgb(${shade}, ${shade + 2}, ${shade + 6})`;
+        g.fillRect(tx * half + 3, ty * half + 3, half - 6, half - 6);
+        g.fillStyle = 'rgba(148, 163, 184, 0.07)';
+        g.fillRect(tx * half + 3, ty * half + 3, half - 6, 3);
+      }
+    }
+  });
+
+  // Sky: a vertical gradient with a few soft clouds, wrapped on the inside of
+  // a big sphere.
+  const sky = paintCanvas(512, (g, size) => {
+    const grad = g.createLinearGradient(0, 0, 0, size);
+    grad.addColorStop(0, '#1e3a8a');
+    grad.addColorStop(0.45, '#60a5fa');
+    grad.addColorStop(0.72, '#bae6fd');
+    grad.addColorStop(1, '#dbeafe');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, size, size);
+
+    g.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    for (let i = 0; i < 26; i++) {
+      const n = (i * 2654435761) >>> 0;
+      const x = n % size;
+      const y = size * 0.32 + ((n >> 8) % Math.floor(size * 0.3));
+      const r = 16 + ((n >> 16) % 34);
+      g.beginPath();
+      g.ellipse(x, y, r, r * 0.42, 0, 0, Math.PI * 2);
+      g.fill();
+    }
+  });
+  sky.wrapS = THREE.ClampToEdgeWrapping;
+  sky.wrapT = THREE.ClampToEdgeWrapping;
+
+  textures = { brick, cap, floor, sky };
+  return textures;
+}
+
 function webglAvailable() {
   try {
     if (!window.WebGLRenderingContext) return false;
@@ -239,11 +340,16 @@ function mountMaze(ctx) {
   const view = document.createElement('div');
   view.className = 'viewport';
 
-  const minimap = document.createElement('canvas');
-  minimap.className = 'minimap';
-  const map2d = minimap.getContext('2d');
 
   const pad = dpad((dir) => setInput(dir, true), { onRelease: (dir) => setInput(dir, false) });
+
+  // Shown in place of the 3D view when WebGL is missing.
+  function fallbackNote() {
+    const note = document.createElement('p');
+    note.className = 'viewport__note';
+    note.textContent = 'The 3D view needs WebGL, which this browser has not enabled.';
+    return note;
+  }
 
   ctx.settings.append(courseRow.el);
   ctx.score.append(scoreRow.el);
@@ -267,14 +373,28 @@ function mountMaze(ctx) {
   function buildScene() {
     if (scene) disposeScene();
 
-    scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x090d1a);
-    scene.fog = new THREE.Fog(0x090d1a, 3, 15);
+    const skin = makeTextures();
 
-    camera = new THREE.PerspectiveCamera(75, 16 / 10, 0.05, 80);
+    scene = new THREE.Scene();
+    // Fog is tinted to the sky's horizon so distant walls fade into it rather
+    // than into a dark band that would give the open top away.
+    scene.fog = new THREE.Fog(0xa9cdf2, 8, 46);
+
+    camera = new THREE.PerspectiveCamera(MAZE_FOV, 16 / 10, 0.05, 220);
+
+    // Sky: a big sphere seen from the inside, unaffected by fog.
+    const skyDome = new THREE.Mesh(
+      new THREE.SphereGeometry(110, 32, 20),
+      new THREE.MeshBasicMaterial({ map: skin.sky, side: THREE.BackSide, fog: false }));
+    skyDome.position.set(maze.w / 2, 0, maze.h / 2);
+    scene.add(skyDome);
 
     const wallGeometry = new THREE.BoxGeometry(1, WALL_HEIGHT, 1);
-    const wallMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    const brickSide = new THREE.MeshLambertMaterial({ map: skin.brick, color: 0xffffff });
+    const brickTop = new THREE.MeshLambertMaterial({ map: skin.cap, color: 0xffffff });
+    // BoxGeometry face order is +x, -x, +y, -y, +z, -z — index 2 is the top,
+    // which is on show now there is no ceiling.
+    const wallMaterial = [brickSide, brickSide, brickTop, brickTop, brickSide, brickSide];
 
     // One InstancedMesh for every wall block: thousands of cubes in a single
     // draw call, which keeps even the largest maze smooth.
@@ -294,10 +414,11 @@ function mountMaze(ctx) {
       placer.updateMatrix();
       walls.setMatrixAt(i, placer.matrix);
 
-      // Deterministic per-block shade so the stonework has texture rather than
-      // reading as one flat slab.
-      const noise = ((x * 73856093) ^ (y * 19349663)) % 100 / 100;
-      tint.setHSL(0.6, 0.12, 0.32 + noise * 0.16);
+      // A whisper of per-block variation so a long run of wall does not read
+      // as one flat repeat. Kept subtle: the bricks should blend, not stripe.
+      const noise = (((x * 73856093) ^ (y * 19349663)) >>> 0) % 100 / 100;
+      const shade = 0.93 + noise * 0.09;
+      tint.setRGB(shade, shade, shade);
       walls.setColorAt(i, tint);
     });
 
@@ -305,20 +426,22 @@ function mountMaze(ctx) {
     if (walls.instanceColor) walls.instanceColor.needsUpdate = true;
     scene.add(walls);
 
+    // Floor tiles, one per grid square. The texture holds a 2x2 block, so the
+    // repeat is half the maze in each direction.
+    const floorTexture = skin.floor.clone();
+    floorTexture.needsUpdate = true;
+    floorTexture.wrapS = THREE.RepeatWrapping;
+    floorTexture.wrapT = THREE.RepeatWrapping;
+    floorTexture.repeat.set(maze.w / 2, maze.h / 2);
+
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(maze.w, maze.h),
-      new THREE.MeshLambertMaterial({ color: 0x141c2e }));
+      new THREE.MeshLambertMaterial({ map: floorTexture, color: 0xffffff }));
     floor.rotation.x = -Math.PI / 2;
     floor.position.set(maze.w / 2, 0, maze.h / 2);
     scene.add(floor);
 
-    // A ceiling turns open-topped trenches into real corridors.
-    const ceiling = new THREE.Mesh(
-      new THREE.PlaneGeometry(maze.w, maze.h),
-      new THREE.MeshLambertMaterial({ color: 0x0c1322 }));
-    ceiling.rotation.x = Math.PI / 2;
-    ceiling.position.set(maze.w / 2, WALL_HEIGHT, maze.h / 2);
-    scene.add(ceiling);
+    // No ceiling — the maze is open to the sky.
 
     // The exit: a glowing pillar you can pick out from down a corridor.
     exitPillar = new THREE.Mesh(
@@ -331,8 +454,16 @@ function mountMaze(ctx) {
     exitGlow.position.set(maze.exit.x + 0.5, 1.2, maze.exit.y + 0.5);
     scene.add(exitGlow);
 
-    scene.add(new THREE.AmbientLight(0x8ba0c4, 0.28));
-    torch = new THREE.PointLight(0xffd9a0, 2.1, 9, 1.6);
+    // Daylight now that the maze is open: sky above, bounced light from the
+    // floor, and a sun raking across so the wall faces read differently.
+    scene.add(new THREE.HemisphereLight(0xcfe4ff, 0x3b4048, 1.05));
+
+    const sun = new THREE.DirectionalLight(0xfff6e0, 0.85);
+    sun.position.set(maze.w * 0.35, 30, -maze.h * 0.2);
+    scene.add(sun);
+
+    // A soft lamp on the camera keeps nearby walls from going flat.
+    torch = new THREE.PointLight(0xffe9c4, 0.75, 8, 1.8);
     camera.add(torch);
     scene.add(camera);
   }
@@ -397,7 +528,6 @@ function mountMaze(ctx) {
     camera.position.set(walker.x, eye, walker.y);
     camera.rotation.set(pitch, -walker.yaw - Math.PI / 2, 0, 'YXZ');
     renderer.render(scene, camera);
-    drawMinimap();
     scoreRow.set('time', clock(seconds));
 
     if (walker.escaped && !before) escape();
@@ -439,8 +569,6 @@ function mountMaze(ctx) {
     const route = solveMaze(maze);
     scoreRow.set('level', `${level + 1}/${course.levels.length}`);
     scoreRow.set('left', route ? `${route.length} steps` : '—');
-    minimap.width = maze.w * 6;
-    minimap.height = maze.h * 6;
 
     if (renderer) buildScene();
   }
@@ -470,40 +598,10 @@ function mountMaze(ctx) {
     loadLevel();
 
     if (!renderer) return;              // still loading, or unsupported
-    view.replaceChildren(renderer.domElement, minimap);
+    view.replaceChildren(renderer.domElement);
     resize();
     ctx.setStatus(`Maze 1 of ${course.levels.length} — find the way out`);
     start();
-  }
-
-  /* ---------- minimap ---------- */
-
-  function drawMinimap() {
-    const cell = 6;
-    map2d.fillStyle = 'rgba(2, 6, 23, 0.75)';
-    map2d.fillRect(0, 0, minimap.width, minimap.height);
-
-    map2d.fillStyle = '#334155';
-    for (let y = 0; y < maze.h; y++) {
-      for (let x = 0; x < maze.w; x++) {
-        if (isWall(maze, x, y)) map2d.fillRect(x * cell, y * cell, cell, cell);
-      }
-    }
-
-    map2d.fillStyle = '#4ade80';
-    map2d.fillRect(maze.exit.x * cell, maze.exit.y * cell, cell, cell);
-
-    map2d.fillStyle = '#fbbf24';        // you, with a nose showing your heading
-    map2d.beginPath();
-    map2d.arc(walker.x * cell, walker.y * cell, cell * 0.5, 0, Math.PI * 2);
-    map2d.fill();
-    map2d.strokeStyle = '#fbbf24';
-    map2d.lineWidth = 2;
-    map2d.beginPath();
-    map2d.moveTo(walker.x * cell, walker.y * cell);
-    map2d.lineTo((walker.x + Math.cos(walker.yaw) * 1.4) * cell,
-      (walker.y + Math.sin(walker.yaw) * 1.4) * cell);
-    map2d.stroke();
   }
 
   /* ---------- input ---------- */
@@ -579,14 +677,14 @@ function mountMaze(ctx) {
 
   if (!webglAvailable()) {
     ctx.setStatus('This browser has no WebGL, so the 3D view cannot run.');
-    view.append(minimap);
+    view.append(fallbackNote());
   } else {
     ctx.setStatus('Loading the 3D engine…');
     loadThree().then((ok) => {
       if (destroyed) return;
       if (!ok) {
         ctx.setStatus('Could not load the 3D engine.');
-        view.append(minimap);
+        view.append(fallbackNote());
         return;
       }
       startRenderer();
