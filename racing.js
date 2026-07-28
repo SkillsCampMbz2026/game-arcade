@@ -65,7 +65,7 @@ const RIVAL_COLOURS = ['#38bdf8', '#c084fc', '#34d399', '#fb7185', '#f472b6', '#
 // Every car on the grid is the same chassis, at the same size — the field is
 // identical bodywork in different colours, and the only thing separating them
 // is how they drive.
-const CAR_SIZE = { width: 440, height: 330 };
+const CAR_SIZE = { width: 360, height: 330 };
 const CAR_HALF_WIDTH = CAR_SIZE.width / (2 * ROAD_WIDTH);
 
 // The one silhouette every car is drawn from: a rounded cartoon shape with a
@@ -74,19 +74,22 @@ const CAR_HALF_WIDTH = CAR_SIZE.width / (2 * ROAD_WIDTH);
 // ones are fractions of its half-width.
 const CAR_PROFILE = {
   roofY: 0.30,        // where the dome meets the shoulders
-  waistY: 0.52,       // window line
-  hipY: 0.86,         // widest point, over the wheels
-  skirtY: 0.80,       // start of the shaded lower panel
-  rockerY: 0.94,      // bottom of the bodywork
+  waistY: 0.50,       // window line
+  hipY: 0.76,         // widest point, over the wheels
+  skirtY: 0.68,       // start of the shaded lower panel
+  rockerY: 0.84,      // bottom of the bodywork — the car sits ON its wheels,
+                      // so this stops short of the road
   shoulder: 0.72,
   hip: 1.0,
-  rocker: 0.84,
+  rocker: 0.86,
   glassTop: 0.10,
-  glassBottom: 0.50,
+  glassBottom: 0.48,
   glassHalf: 0.60,
-  wheel: { x: 1.02, y: 0.78, radius: 0.25 },
-  lights: { y: 0.60, half: 0.86, w: 0.13, h: 0.1 },
-  bumper: { y: 0.83, half: 0.8, h: 0.09 },
+  // Under the haunches with the tread meeting the road: the top half hides
+  // behind the bodywork and the bottom shows in the gap beneath it.
+  wheel: { x: 0.78, y: 0.82, radius: 0.16 },
+  lights: { y: 0.56, half: 0.86, w: 0.13, h: 0.1 },
+  bumper: { y: 0.72, half: 0.82, h: 0.08 },
 };
 
 /* The roster. Every entry is a set of numbers, not a look:
@@ -1086,7 +1089,7 @@ function mountRacing(ctx) {
       const wy = at(p.wheel.y);
       for (const side of [-1, 1]) {
         const wx = across(side * p.wheel.x);
-        g.fillStyle = '#3f3f46';                       // tyre
+        g.fillStyle = '#27272a';                       // tyre
         g.beginPath();
         g.arc(wx, wy, radius, 0, Math.PI * 2);
         g.fill();
@@ -1094,7 +1097,7 @@ function mountRacing(ctx) {
         if (detailed) {
           g.fillStyle = '#9ca3af';                     // rim
           g.beginPath();
-          g.arc(wx, wy, radius * 0.56, 0, Math.PI * 2);
+          g.arc(wx, wy, radius * 0.5, 0, Math.PI * 2);
           g.fill();
           g.fillStyle = '#6b7280';                     // hub
           g.beginPath();
