@@ -37,13 +37,15 @@ const STEER_AUTHORITY = 0.35;    // you can still turn in when crawling
 const CENTRIFUGAL = 0.64;        // how hard curves push you outward
 const FOG_DENSITY = 4.5;
 
-// There is no top speed. Engine force falls away as you go faster — the way
-// real power-limited acceleration does — but it never reaches zero, so the car
-// keeps gaining indefinitely. SPEED_REFERENCE is only a yardstick: it is the
-// speed the dial calls 500 km/h, and what percentages are measured against.
+// Engine force falls away as you go faster — the way real power-limited
+// acceleration does — and the car is held to a top speed of 700 km/h.
+// SPEED_REFERENCE is the yardstick percentages are measured against: it reads
+// 500 km/h on the dial, so the cap sits at 1.4x it.
 const SPEED_REFERENCE = SEGMENT_LENGTH * 100;
 const REFERENCE_KMH = 500;
 const KMH_PER_UNIT = REFERENCE_KMH / SPEED_REFERENCE;
+const TOP_SPEED_KMH = 700;
+const MAX_SPEED = TOP_SPEED_KMH / KMH_PER_UNIT;
 const ROLLING_DRAG = 900;               // constant, always acting
 const COAST_DRAG = 0.35;                // aero, proportional to speed
 const BRAKE_FORCE = SPEED_REFERENCE / 1.4;
@@ -164,8 +166,9 @@ function carStats(model, roster = CAR_MODELS) {
   };
 }
 
-// A car's natural pace, used to set how hard each rival pushes.
-const paceOf = (model) => SPEED_REFERENCE * (0.66 + 0.34 * carStats(model).speed);
+// A car's natural pace, used to set how hard each rival pushes. Scaled off the
+// cap so the field stays competitive with a player who can reach it.
+const paceOf = (model) => MAX_SPEED * (0.54 + 0.28 * carStats(model).speed);
 
 const CAR_PAINTS = [
   { id: 'sunburst', label: 'Sunburst', colour: '#fbbf24' },
@@ -256,6 +259,8 @@ function addSegment(segments, curve, y) {
     sprites: [],
     dark: Math.floor(n / RUMBLE_LENGTH) % 2 === 1,
     finish: n < FINISH_SEGMENTS,
+    post: n % 4 === 0,                 // guardrail upright
+    gantry: n > 40 && n % 90 === 0,    // overhead sign bridge
     clip: 0,
     fog: 1,
   });
@@ -616,7 +621,7 @@ function stepRace(state, input, dt) {
   }
 
   state.playerX = clampNumber(state.playerX, -2, 2);
-  state.speed = Math.max(0, state.speed); // no upper bound, by design
+  state.speed = clampNumber(state.speed, 0, MAX_SPEED);
 
   // Contact with a rival scrubs off speed and shoves you aside — it costs you
   // places rather than ending the race.
@@ -841,6 +846,19 @@ function mountRacing(ctx) {
     let x = 0;
     let dx = -(baseSegment.curve * basePercent);
 
+    /* Bank the whole world through a corner. The car stays level and the
+       horizon tilts around it, which is what selling a chase camera as three
+       dimensional really takes. Scaled up slightly so the rotated frame still
+       covers the canvas corners. */
+    const roll = clampNumber(baseSegment.curve * Math.min(1.4, state.speed / SPEED_REFERENCE)
+      * 0.007, -0.055, 0.055);
+
+    g.save();
+    g.translate(RACE_W / 2, RACE_H * 0.55);
+    g.rotate(roll);
+    g.scale(1.08, 1.08);
+    g.translate(-RACE_W / 2, -RACE_H * 0.55);
+
     drawSky(palette, playerY);
 
     // Road, near to far — each segment clipped by the nearest one drawn so far,
@@ -871,12 +889,18 @@ function mountRacing(ctx) {
       maxY = segment.p2.screen.y;
     }
 
+    // Barriers run near-to-far so the nearer rail overlaps the one behind it.
+    for (const segment of visible) drawBarrier(segment, palette);
+
     // Scenery and cars, far to near, so nearer things paint over further ones.
     for (let i = visible.length - 1; i >= 0; i--) {
       const segment = visible[i];
+      if (segment.gantry) drawGantry(segment, palette);
       for (const sprite of segment.sprites) drawSprite(segment, sprite, palette);
       for (const car of segment.cars) drawRival(segment, car);
     }
+
+    g.restore();   // the car and the HUD stay level while the world banks
 
     drawPlayer();
     drawHud(palette);
@@ -986,6 +1010,98 @@ function mountRacing(ctx) {
       g.closePath();
       g.fill();
     }
+  }
+
+  /* A continuous crash barrier down each verge. Because it is built from the
+     same projected segment pair as the road, it shrinks and curves with the
+     tarmac — a solid rail running away to the horizon is the strongest depth
+     cue on screen, far more so than scattered roadside objects. */
+  function drawBarrier(segment, palette) {
+    const p1 = segment.p1.screen;
+    const p2 = segment.p2.screen;
+    if (p1.w < 2) return;
+
+    // Fade the rail into the distance with alpha. A full-width fog rectangle
+    // like the road uses would repaint the sky and the scenery behind it.
+    g.globalAlpha = Math.max(0.05, segment.fog);
+
+    const railTop = (s) => s.w * 0.16;             // height scales with distance
+    const h1 = railTop(p1);
+    const h2 = railTop(p2);
+    const out = 1.16;                              // just beyond the rumble strip
+
+    for (const side of [-1, 1]) {
+      const x1 = p1.x + side * p1.w * out;
+      const x2 = p2.x + side * p2.w * out;
+
+      if (segment.post) {                          // upright, every few segments
+        g.fillStyle = '#475569';
+        g.beginPath();
+        g.moveTo(x1 - p1.w * 0.02, p1.y);
+        g.lineTo(x1 + p1.w * 0.02, p1.y);
+        g.lineTo(x1 + p1.w * 0.02, p1.y - h1);
+        g.lineTo(x1 - p1.w * 0.02, p1.y - h1);
+        g.closePath();
+        g.fill();
+      }
+
+      g.fillStyle = side < 0 ? '#cbd5e1' : '#e2e8f0';   // rail face
+      g.beginPath();
+      g.moveTo(x1, p1.y - h1 * 0.45);
+      g.lineTo(x2, p2.y - h2 * 0.45);
+      g.lineTo(x2, p2.y - h2);
+      g.lineTo(x1, p1.y - h1);
+      g.closePath();
+      g.fill();
+
+      if (segment.dark) {                          // dashed shadow under the rail
+        g.fillStyle = 'rgba(15, 23, 42, 0.35)';
+        g.beginPath();
+        g.moveTo(x1, p1.y - h1 * 0.45);
+        g.lineTo(x2, p2.y - h2 * 0.45);
+        g.lineTo(x2, p2.y - h2 * 0.2);
+        g.lineTo(x1, p1.y - h1 * 0.2);
+        g.closePath();
+        g.fill();
+      }
+    }
+
+    g.globalAlpha = 1;
+  }
+
+  /* A sign bridge spanning the road. Passing under one is the clearest signal
+     that the world has height as well as depth. */
+  function drawGantry(segment, palette) {
+    const s = segment.p1.screen;
+    if (s.w < 6) return;
+
+    const span = s.w * 1.3;
+    const height = s.w * 1.15;
+    const legW = Math.max(1, s.w * 0.06);
+    const beamH = Math.max(1.5, s.w * 0.18);
+    const top = s.y - height;
+
+    g.save();
+    g.beginPath();
+    g.rect(0, 0, RACE_W, Math.max(0, segment.clip));
+    g.clip();
+    g.globalAlpha = Math.max(0.2, segment.fog);
+
+    g.fillStyle = '#475569';                       // legs
+    g.fillRect(s.x - span, s.y - height, legW, height);
+    g.fillRect(s.x + span - legW, s.y - height, legW, height);
+
+    g.fillStyle = '#334155';                       // beam
+    g.fillRect(s.x - span, top, span * 2, beamH);
+
+    if (s.w > 22) {                                // sign panels
+      g.fillStyle = palette.ridgeNear;
+      g.fillRect(s.x - span * 0.62, top + beamH * 0.18, span * 0.5, beamH * 0.64);
+      g.fillRect(s.x + span * 0.12, top + beamH * 0.18, span * 0.5, beamH * 0.64);
+    }
+
+    g.globalAlpha = 1;
+    g.restore();
   }
 
   // Anything standing beside the road: projected, scaled and clipped by hills.
@@ -1514,7 +1630,7 @@ if (typeof module !== 'undefined') {
     SEGMENT_LENGTH, ROAD_WIDTH, CAMERA_DEPTH, CAMERA_HEIGHT, SPEED_REFERENCE,
     RACE_MAPS, RACE_W, RACE_H, RIVAL_COUNT, COUNTDOWN, OFF_ROAD_LIMIT,
     CAR_MODELS, CAR_PAINTS, STEER_RATE, STEER_AUTHORITY, CENTRIFUGAL,
-    REFERENCE_KMH, RACE_LAPS, DRAW_DISTANCE, DRAFT_RANGE,
+    REFERENCE_KMH, RACE_LAPS, DRAW_DISTANCE, DRAFT_RANGE, TOP_SPEED_KMH, MAX_SPEED,
     CAR_SIZE, CAR_HALF_WIDTH, CAR_PROFILE, CAR_LOOKS, PLAYER_DRAW,
   };
 }

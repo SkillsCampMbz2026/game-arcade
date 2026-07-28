@@ -33,6 +33,21 @@ const audio = (() => {
     return ctx;
   }
 
+  /* Browsers create the context suspended and only let it start inside a user
+     gesture. A continuous sound like the engine never calls back into
+     context(), so without this it would stay silent forever: the first click,
+     key or touch anywhere on the page resumes it. */
+  function unlock() {
+    const c = ctx;
+    if (c && c.state === 'suspended') c.resume().catch(() => {});
+  }
+
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    for (const type of ['pointerdown', 'keydown', 'touchstart']) {
+      window.addEventListener(type, unlock, { capture: true });
+    }
+  }
+
   function noise(c) {
     if (!noiseBuffer) {
       const frames = c.sampleRate * 0.6;
@@ -120,9 +135,10 @@ const audio = (() => {
     if (effect && enabled) effect();
   }
 
-  /* A continuous engine note. Pitch and brightness follow road speed; the
-     throttle adds a little more edge. Returns a no-op controller when audio
-     is unavailable, so callers never have to check. */
+  /* The sound of a car in motion: an engine note whose pitch and brightness
+     follow road speed, layered with rushing road/wind noise that rises with
+     it. Both fall silent when the car is stopped. Returns a no-op controller
+     when audio is unavailable, so callers never have to check. */
   function engine() {
     const c = context();
     if (!c) return { set() {}, stop() {} };
@@ -145,6 +161,23 @@ const audio = (() => {
     low.start();
     high.start();
 
+    // Road roar: looping noise, opened up as speed rises.
+    const rush = c.createBufferSource();
+    const rushFilter = c.createBiquadFilter();
+    const rushAmp = c.createGain();
+
+    rush.buffer = noise(c);
+    rush.loop = true;
+    rushFilter.type = 'bandpass';
+    rushFilter.frequency.value = 500;
+    rushFilter.Q.value = 0.7;
+    rushAmp.gain.value = 0;
+
+    rush.connect(rushFilter);
+    rushFilter.connect(rushAmp);
+    rushAmp.connect(master);
+    rush.start();
+
     let stopped = false;
 
     return {
@@ -152,18 +185,28 @@ const audio = (() => {
         if (stopped) return;
         const t = c.currentTime;
         const rev = Math.min(2.2, load);
+        const moving = Math.min(1, load * 1.6);
+
         low.frequency.setTargetAtTime(42 + rev * 95, t, 0.06);
         high.frequency.setTargetAtTime(21 + rev * 47, t, 0.06);
         filter.frequency.setTargetAtTime(420 + rev * 1500 + (throttle ? 350 : 0), t, 0.09);
-        amp.gain.setTargetAtTime(enabled ? 0.035 + rev * 0.05 + (scrub ? 0.03 : 0) : 0, t, 0.08);
+        amp.gain.setTargetAtTime(enabled ? 0.03 + rev * 0.055 : 0, t, 0.08);
+
+        // Grass is a coarser, louder scrape than tarmac.
+        rushFilter.frequency.setTargetAtTime(scrub ? 900 : 420 + rev * 900, t, 0.12);
+        rushAmp.gain.setTargetAtTime(
+          enabled ? moving * (scrub ? 0.16 : 0.05) : 0, t, 0.1);
       },
       stop() {
         if (stopped) return;
         stopped = true;
         try {
-          amp.gain.setTargetAtTime(0, c.currentTime, 0.05);
-          low.stop(c.currentTime + 0.2);
-          high.stop(c.currentTime + 0.2);
+          const t = c.currentTime;
+          amp.gain.setTargetAtTime(0, t, 0.05);
+          rushAmp.gain.setTargetAtTime(0, t, 0.05);
+          low.stop(t + 0.2);
+          high.stop(t + 0.2);
+          rush.stop(t + 0.2);
         } catch { /* already stopped */ }
       },
     };
