@@ -1,7 +1,8 @@
 # Game Arcade
 
-Five games in one page. No build step, no dependencies, no network — plain
-HTML, CSS and JavaScript that runs straight from a file.
+Six games in one page. No build step and no network — plain HTML, CSS and
+JavaScript that runs straight from a file. The only dependency is three.js,
+vendored in `vendor/` and loaded on demand by the maze.
 
 **[▶ Play it](https://skillscampmbz2026.github.io/game-arcade/)**
 
@@ -13,7 +14,8 @@ HTML, CSS and JavaScript that runs straight from a file.
 | **Connect Four** | 6×5, 7×6 and 8×7 boards, drop preview, falling discs |
 | **Matching Cards** | Four board sizes, solo against the clock or two players |
 | **Snake** | Three speeds and sizes, solid walls or wrap-around, saved best scores |
-| **Car Racing** | 3D perspective racer — 8 cars, 3 laps, 3 maps, pick your car and paint |
+| **Car Racing** | 3D perspective racer — 8 cars, 6 laps, 3 maps, pick your car and paint |
+| **Escape the Maze** | First-person maze in real 3D, three sizes, minimap, saved best times |
 
 ## The CPU opponents
 
@@ -35,18 +37,43 @@ projection through a camera behind and above the car. It draws with the canvas
 2D API rather than WebGL — projected segments filled as trapezoids, painted
 far-to-near — which is how arcade racers drew 3D roads before GPUs.
 
-- **No top speed.** Engine force falls away as you gain pace, the way real
-  power-limited acceleration does, but never reaches zero. The car keeps
-  gaining indefinitely; it just takes longer and longer.
-- **Five cars, one body.** Identical bodywork in different colours — the only
-  thing separating them is power, power band, grip and braking, and no two
-  share a value on any axis. The spec bars are computed from the same numbers
-  the physics uses, so they cannot drift out of sync with how a car drives.
+- **700 km/h limiter.** Engine force falls away as you gain pace, the way real
+  power-limited acceleration does, and is still pulling at the cap — so it is
+  the limiter holding the car, not the car running out of puff.
+- **Five cars, five bodies.** Gran coupé, sport saloon, hot hatch, estate and
+  electric, each with its own roofline, light signature, spoiler and pipes.
+  They are separated by power, power band, grip and braking, and no two share
+  a value on any axis. The spec bars are computed from the same numbers the
+  physics uses, so they cannot drift out of sync with how a car drives.
 - Slipstreaming, speed-squared cornering load, hills that hide the road behind
-  them, and collision swept across every segment a frame crosses.
+  them, crash barriers and sign gantries, a world that banks through corners,
+  and collision swept across every segment a frame crosses.
 
 Controls: **W / ↑** throttle, **A D** or **← →** steer, **S / ↓** brake,
-**Space** to pause.
+**Q E** to drift, **Space** to pause.
+
+## The maze
+
+The one game that uses a library. The road racer fakes 3D with a perspective
+projection onto a 2D canvas; the maze is real 3D — three.js, a WebGL camera,
+instanced wall geometry and a torch that follows you.
+
+three.js is **vendored as a classic script** rather than pulled from a CDN or
+imported as an ES module, because the arcade has to keep working offline and
+straight from a `file://` page, where module imports are blocked by CORS. It is
+600 KB, so it is fetched the first time you open the maze rather than on every
+page load, and the game degrades to a message plus the minimap if WebGL is
+unavailable.
+
+Maze generation is a recursive backtracker, which produces a *perfect* maze:
+every square reachable, exactly one route between any two points, no loops.
+
+## Sound
+
+Every effect is synthesised with the Web Audio API — no audio files, so this
+stays a plain static page. The racer gets a continuous engine note that tracks
+speed with road noise layered under it. The 🔊 button in the title bar
+remembers your choice.
 
 ## Running it
 
@@ -57,12 +84,15 @@ Open `index.html`. That's the whole of it.
     index.html      the shared shell
     app.js          the hub — swaps one game module in at a time
     ui.js           shared widgets and the game registry
+    audio.js        synthesised sound effects and the engine note
     ai.js           board-game rules and CPU strategies
     boardgames.js   Tic Tac Toe and Connect Four
     matching.js     Matching Cards
     snake.js        Snake
     racing.js       Car Racing
+    maze.js         Escape the Maze (three.js)
     style.css       everything visual
+    vendor/         three.min.js, loaded on demand
 
 Each game registers itself with `{ id, label, mount(ctx) }` and returns a
 `destroy()` so the hub can tear down its timers and listeners on the way out.

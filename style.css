@@ -46,6 +46,7 @@ body {
 .game[data-theme="snake"] { --x: #4ade80; --o: #38bdf8; }
 .game[data-theme="race"]  { --x: #fbbf24; --o: #38bdf8; }
 .game[data-theme="cards"] { --x: #a78bfa; --o: #f472b6; }
+.game[data-theme="maze"]  { --x: #4ade80; --o: #fbbf24; }
 
 .titlebar {
   position: relative;
@@ -478,6 +479,30 @@ h1 {
 .dpad__btn--left  { grid-area: 2 / 1; }
 .dpad__btn--down  { grid-area: 2 / 2; }
 .dpad__btn--right { grid-area: 2 / 3; }
+
+/* First-person viewport with the minimap tucked into a corner */
+.viewport {
+  position: relative;
+  width: 100%;
+  min-height: 120px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #0b1020;
+  line-height: 0;
+}
+
+.viewport canvas { display: block; }
+
+.minimap {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 128px;
+  height: auto;
+  border-radius: 8px;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+  image-rendering: pixelated;
+}
 
 .holdrow {
   display: flex;
