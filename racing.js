@@ -54,6 +54,13 @@ const OFF_ROAD_LIMIT = SPEED_REFERENCE / 4;
 const OFF_ROAD_GRIP = 0.45;             // the grass barely steers
 const DRAFT_RANGE = SEGMENT_LENGTH * 9; // tow distance behind a rival
 const DRAFT_BOOST = 0.22;               // extra engine force in clean air behind
+// Drift: hold Q or E to break traction and slide. The slide builds while held
+// and unwinds when let go, and scrubbing the tyres sideways costs you speed.
+// Comfortably more than STEER_RATE: a slide has to beat simply turning the
+// wheel, or there would be no reason to break traction at all.
+const DRIFT_RATE = 5.4;                 // road-widths per second at full slide
+const DRIFT_BUILD = 3.4;                // how fast the slide winds in and out
+const DRIFT_SCRUB = 0.3;                // share of speed shed per second sliding
 const RACE_LAPS = 6;
 
 const speedInKmh = (speed) => Math.round(speed * KMH_PER_UNIT);
@@ -445,6 +452,7 @@ function createRace(mapId, modelId = CAR_MODELS[0].id, rng = Math.random) {
     drafting: false,
     bumped: 0,
     steering: 0,
+    drift: 0,        // -1 fully sliding left .. +1 fully sliding right
     curve: 0,
   };
 
@@ -597,6 +605,20 @@ function stepRace(state, input, dt) {
   else if (input.right) state.playerX += steer;
   state.steering = (input.left ? -1 : 0) + (input.right ? 1 : 0);
 
+  /* Drift. The slide winds in toward whichever key is held and unwinds when
+     released, so it takes a moment to break traction and a moment to gather it
+     back up. It only bites while the car is actually rolling. */
+  const wantDrift = (input.driftLeft ? -1 : 0) + (input.driftRight ? 1 : 0);
+  const wind = DRIFT_BUILD * dt;
+  state.drift += clampNumber(wantDrift - state.drift, -wind, wind);
+  if (wantDrift === 0 && Math.abs(state.drift) < 0.01) state.drift = 0;
+
+  const sliding = Math.abs(state.drift);
+  if (sliding > 0.01) {
+    state.playerX += state.drift * DRIFT_RATE * dt * Math.min(1.3, speedPercent);
+    state.speed -= state.speed * DRIFT_SCRUB * sliding * dt;   // tyre scrub
+  }
+
   // A curve throws you toward its outside edge with the square of speed, and
   // grip is what resists it. Uncapped, so genuinely fast corners need braking.
   state.playerX -= dt * speedPercent * speedPercent * playerSegment.curve
@@ -650,7 +672,10 @@ function stepRace(state, input, dt) {
 
 function mountRacing(ctx) {
   let mapId = RACE_MAPS[0].id;
-  const input = { left: false, right: false, accel: false, brake: false };
+  const input = {
+    left: false, right: false, accel: false, brake: false,
+    driftLeft: false, driftRight: false,
+  };
   let frame = null;
   let lastTime = 0;
   let running = false;
@@ -725,16 +750,23 @@ function mountRacing(ctx) {
 
   ctx.settings.append(mapRow.el, modelRow.el, paintRow.el, card.el);
   ctx.score.append(scoreRow.el);
-  ctx.stage.append(canvas, pad);
+  const driftPad = holdRow([
+    { id: 'driftLeft', label: '⟲ Q', aria: 'Drift left' },
+    { id: 'driftRight', label: 'E ⟳', aria: 'Drift right' },
+  ], (id) => setInput(id, true), (id) => setInput(id, false));
+
+  ctx.stage.append(canvas, pad, driftPad);
   ctx.controls.append(controlsEl);
   ctx.setTheme('race');
-  ctx.setHint('W / ↑ accelerate · A D or ← → steer · S / ↓ brake');
+  ctx.setHint('W / ↑ accelerate · A D or ← → steer · S / ↓ brake · Q E drift');
 
   function setInput(dir, down) {
     if (dir === 'left') input.left = down;
     else if (dir === 'right') input.right = down;
     else if (dir === 'up') input.accel = down;
     else if (dir === 'down') input.brake = down;
+    else if (dir === 'driftLeft') input.driftLeft = down;
+    else if (dir === 'driftRight') input.driftRight = down;
   }
 
   /* ---------- loop ---------- */
@@ -760,7 +792,11 @@ function mountRacing(ctx) {
       }
     }
     if (state.bumped > bumpedBefore) audio.play('crash');
-    if (revs) revs.set(state.speed / SPEED_REFERENCE, input.accel, state.offRoad);
+    // Sliding tyres howl like the grass does.
+    if (revs) {
+      revs.set(state.speed / SPEED_REFERENCE, input.accel,
+        state.offRoad || Math.abs(state.drift) > 0.25);
+    }
 
     if (wasCounting && state.countdown === 0) ctx.setStatus('Go!');
     if (state.finished) finish();
@@ -1490,15 +1526,20 @@ function mountRacing(ctx) {
     const x = RACE_W / 2 + ((input.left ? -7 : 0) + (input.right ? 7 : 0)) * UI + shake;
     const y = RACE_H - h - 18 * UI + bob + rumble;
 
-    // Body roll: lean into the steering, and into the corner you are taking.
+    // Body roll: lean into the steering and the corner, then kick the tail out
+    // when drifting — sliding left swings the back of the car to the left.
+    const slide = state.drift || 0;
     const lean = ((input.left ? -1 : 0) + (input.right ? 1 : 0)) * 0.055
-      + (state.curve || 0) * Math.min(1.6, speedPercent) * 0.012;
+      + (state.curve || 0) * Math.min(1.6, speedPercent) * 0.012
+      + slide * 0.16;
+
+    if (Math.abs(slide) > 0.08) drawSmoke(x, y + h, w, slide, speedPercent);
 
     g.save();
     g.translate(x, y + h);
     g.rotate(lean);
     g.translate(-x, -(y + h));
-    drawCar(x, y, w, h, carPaint().colour, model, { braking: input.brake });
+    drawCar(x + slide * w * 0.06, y, w, h, carPaint().colour, model, { braking: input.brake });
     g.restore();
 
     // Speed streaks along the edges of the screen.
@@ -1514,6 +1555,34 @@ function mountRacing(ctx) {
         g.stroke();
       }
     }
+  }
+
+  /* Tyre smoke off the rear wheels while sliding. The puffs are placed from
+     distance travelled rather than a random spray, so they stream away from
+     the car steadily instead of flickering. */
+  function drawSmoke(x, ground, w, slide, speedPercent) {
+    const puffs = 7;
+    const strength = Math.min(1, Math.abs(slide));
+
+    for (let i = 0; i < puffs; i++) {
+      const age = ((state.travelled / 90) + i / puffs) % 1;
+      const spread = w * (0.34 + age * 0.85);
+      const size = w * (0.09 + age * 0.26) * strength;
+      // Puffs billow outward and rise as they fall behind the car.
+      const fade = (1 - age) ** 0.7 * 0.62 * strength * Math.min(1, speedPercent + 0.5);
+      if (fade <= 0.01) continue;
+
+      for (const side of [-1, 1]) {
+        g.globalAlpha = fade;
+        g.fillStyle = '#f1f5f9';
+        g.beginPath();
+        g.ellipse(x + side * spread - slide * w * age * 0.6,
+          ground - age * w * 0.22, size, size * 0.72, 0, 0, Math.PI * 2);
+        g.fill();
+      }
+    }
+
+    g.globalAlpha = 1;
   }
 
   function drawHud(palette) {
@@ -1584,6 +1653,7 @@ function mountRacing(ctx) {
     ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down',
     a: 'left', d: 'right', w: 'up', s: 'down',
     A: 'left', D: 'right', W: 'up', S: 'down',
+    q: 'driftLeft', e: 'driftRight', Q: 'driftLeft', E: 'driftRight',
   };
 
   function onKeyDown(event) {
@@ -1631,6 +1701,7 @@ if (typeof module !== 'undefined') {
     RACE_MAPS, RACE_W, RACE_H, RIVAL_COUNT, COUNTDOWN, OFF_ROAD_LIMIT,
     CAR_MODELS, CAR_PAINTS, STEER_RATE, STEER_AUTHORITY, CENTRIFUGAL,
     REFERENCE_KMH, RACE_LAPS, DRAW_DISTANCE, DRAFT_RANGE, TOP_SPEED_KMH, MAX_SPEED,
+    DRIFT_RATE, DRIFT_BUILD, DRIFT_SCRUB,
     CAR_SIZE, CAR_HALF_WIDTH, CAR_PROFILE, CAR_LOOKS, PLAYER_DRAW,
   };
 }

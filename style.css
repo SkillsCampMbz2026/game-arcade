@@ -479,6 +479,29 @@ h1 {
 .dpad__btn--down  { grid-area: 2 / 2; }
 .dpad__btn--right { grid-area: 2 / 3; }
 
+.holdrow {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.holdrow__btn {
+  min-width: 74px;
+  padding: 9px 14px;
+  border: none;
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.85rem;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.holdrow__btn:hover { background: var(--surface-hi); color: var(--text); }
+.holdrow__btn:active { transform: scale(0.95); color: var(--x); }
+
 .dpad--flat {
   grid-template-columns: repeat(2, 72px);
   grid-template-rows: 44px;

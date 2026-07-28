@@ -222,6 +222,32 @@ function dpad(onPress, { horizontalOnly, onRelease } = {}) {
   return el;
 }
 
+// Buttons that report press and release, for controls that are held rather
+// than tapped. items: [{ id, label }]
+function holdRow(items, onPress, onRelease) {
+  const el = document.createElement('div');
+  el.className = 'holdrow';
+
+  for (const item of items) {
+    const btn = document.createElement('button');
+    btn.className = 'holdrow__btn';
+    btn.textContent = item.label;
+    btn.setAttribute('aria-label', item.aria || item.label);
+
+    btn.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      onPress(item.id);
+    });
+    for (const type of ['pointerup', 'pointerleave', 'pointercancel']) {
+      btn.addEventListener(type, () => onRelease(item.id));
+    }
+
+    el.append(btn);
+  }
+
+  return el;
+}
+
 const formatTime = (seconds) =>
   `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 
