@@ -8,7 +8,10 @@
 </head>
 <body>
   <main class="game" id="game">
-    <h1 id="title">Game Arcade</h1>
+    <div class="titlebar">
+      <h1 id="title">Game Arcade</h1>
+      <button id="sound" class="sound" type="button" aria-pressed="true" title="Sound on/off">🔊</button>
+    </div>
 
     <div id="games" class="picker"></div>
     <div id="settings" class="settings"></div>
@@ -22,6 +25,7 @@
 
   <script src="ai.js"></script>
   <script src="ui.js"></script>
+  <script src="audio.js"></script>
   <script src="boardgames.js"></script>
   <script src="matching.js"></script>
   <script src="snake.js"></script>

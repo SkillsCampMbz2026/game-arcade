@@ -130,6 +130,7 @@ function mountMatching(ctx) {
     if (matched.has(index) || faceUp.includes(index)) return;
 
     startClock();
+    audio.play('flip');
     faceUp.push(index);
     cards[index].classList.add('is-face-up');
 
@@ -145,11 +146,13 @@ function mountMatching(ctx) {
       faceUp = [];
       if (players === 2) pairScores[turn] += 1;
       refreshScores();
+      audio.play('match');
       if (matched.size === deck.length) finish();
       else ctx.setStatus(statusText());
       return;
     }
 
+    audio.play('miss');
     // A miss: show both briefly, then turn them back over.
     refreshScores();
     flipTimer = setTimeout(() => {
@@ -168,6 +171,7 @@ function mountMatching(ctx) {
   function finish() {
     finished = true;
     stopClock();
+    audio.play('finish');
 
     if (players === 1) {
       const best = storage.get(bestKey());

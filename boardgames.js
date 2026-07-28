@@ -81,6 +81,8 @@ function mountBoardGame(ctx, gameId) {
       cell.disabled = true;
     }
 
+    audio.play(rules.gravity ? 'drop' : 'place');
+
     const line = lineAt(board, index, rules);
     if (line) {
       const message = !vsComputer() ? `${nameOf(player)} wins!`
@@ -119,6 +121,8 @@ function mountBoardGame(ctx, gameId) {
     clearPreview();
     scores[scoreKey] += 1;
     scoreRow.set(scoreKey, scores[scoreKey]);
+
+    audio.play(scoreKey === 'draw' ? 'draw' : (vsComputer() && scoreKey === CPU ? 'lose' : 'win'));
 
     cells.forEach((cell) => { cell.disabled = true; });
     if (line) line.forEach((i) => cells[i].classList.add('cell--win'));

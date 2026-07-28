@@ -153,6 +153,7 @@ function mountSnake(ctx) {
 
     state = snakeStep(state, { cells: size.cells, wrap });
 
+    if (state.ate) audio.play('eat');
     if (!state.alive) return finish(`Game over — ${state.cause === 'wall' ? 'hit the wall' : 'bit yourself'}`);
     if (!state.apple) return finish('Perfect! You filled the board');
 
@@ -186,6 +187,7 @@ function mountSnake(ctx) {
   }
 
   function finish(message) {
+    audio.play(state.alive ? 'win' : 'lose');
     stop();
     over = true;
     pauseEl.textContent = 'Play Again';

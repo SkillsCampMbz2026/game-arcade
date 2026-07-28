@@ -51,6 +51,20 @@ function selectGame(id) {
   session = game.mount(gameContext()) || null;
 }
 
+const soundBtn = document.getElementById('sound');
+
+function paintSoundButton() {
+  soundBtn.textContent = audio.enabled ? '🔊' : '🔇';
+  soundBtn.setAttribute('aria-pressed', String(audio.enabled));
+}
+
+soundBtn.addEventListener('click', () => {
+  audio.toggle();
+  paintSoundButton();
+});
+
+paintSoundButton();
+
 const picker = segmented(
   GAME_REGISTRY.map((game) => ({ id: game.id, label: game.label })),
   GAME_REGISTRY[0].id,

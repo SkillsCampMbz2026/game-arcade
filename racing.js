@@ -22,7 +22,9 @@ const DRAW_DISTANCE = 240;       // segments drawn ahead of the camera
 // running off both edges.
 const ROAD_WIDTH = 1100;         // world units from centre line to verge
 const FIELD_OF_VIEW = 100;       // degrees
-const CAMERA_HEIGHT = 1000;      // world units above the road
+// Sitting further back shrinks your own car and closes the size gap to the
+// traffic ahead — at 1000 the player's car towered over nearby rivals.
+const CAMERA_HEIGHT = 1500;      // world units above the road
 const CAMERA_DEPTH = 1 / Math.tan((FIELD_OF_VIEW / 2) * Math.PI / 180);
 const PLAYER_Z = CAMERA_HEIGHT * CAMERA_DEPTH; // camera-to-car distance
 // Your own car is drawn at exactly the size the projection gives it at
@@ -50,7 +52,7 @@ const OFF_ROAD_LIMIT = SPEED_REFERENCE / 4;
 const OFF_ROAD_GRIP = 0.45;             // the grass barely steers
 const DRAFT_RANGE = SEGMENT_LENGTH * 9; // tow distance behind a rival
 const DRAFT_BOOST = 0.22;               // extra engine force in clean air behind
-const RACE_LAPS = 3;
+const RACE_LAPS = 6;
 
 const speedInKmh = (speed) => Math.round(speed * KMH_PER_UNIT);
 
@@ -647,6 +649,8 @@ function mountRacing(ctx) {
   let frame = null;
   let lastTime = 0;
   let running = false;
+  let revs = null;        // the engine note, while the race is running
+  let lastBeep = null;    // which countdown number has already sounded
 
   // Your garage, remembered between sessions.
   const garage = storage.get('race3d-car', {}) || {};
@@ -737,9 +741,21 @@ function mountRacing(ctx) {
     lastTime = time;
 
     const wasCounting = state.countdown > 0;
+    const bumpedBefore = state.bumped;
     stepRace(state, input, dt);
     render();
     refreshScores();
+
+    // One beep per second on the grid, then a longer tone on green.
+    if (wasCounting) {
+      const mark = Math.ceil(state.countdown - 0.2);
+      if (mark !== lastBeep) {
+        lastBeep = mark;
+        audio.play(mark > 0 ? 'beep' : 'go');
+      }
+    }
+    if (state.bumped > bumpedBefore) audio.play('crash');
+    if (revs) revs.set(state.speed / SPEED_REFERENCE, input.accel, state.offRoad);
 
     if (wasCounting && state.countdown === 0) ctx.setStatus('Go!');
     if (state.finished) finish();
@@ -749,14 +765,18 @@ function mountRacing(ctx) {
     stop();
     running = true;
     lastTime = performance.now();
+    if (!revs) revs = audio.engine();
     frame = requestAnimationFrame(loop);
     pauseEl.textContent = 'Pause';
   }
 
+  // Silences the engine as well as the loop, so pausing or leaving the game
+  // never strands a running oscillator.
   function stop() {
     if (frame !== null) cancelAnimationFrame(frame);
     frame = null;
     running = false;
+    if (revs) { revs.stop(); revs = null; }
   }
 
   function togglePause() {
@@ -774,6 +794,7 @@ function mountRacing(ctx) {
   function finish() {
     stop();
     pauseEl.textContent = 'Race Again';
+    audio.play(state.place <= 3 ? 'finish' : 'lose');
 
     const best = storage.get(bestKey());
     const isBest = !best || state.time < best;
@@ -788,6 +809,7 @@ function mountRacing(ctx) {
 
   function restart() {
     stop();
+    lastBeep = null;
     input.left = input.right = input.accel = input.brake = false;
     state = createRace(mapId, modelId);
     refreshScores();

@@ -47,6 +47,32 @@ body {
 .game[data-theme="race"]  { --x: #fbbf24; --o: #38bdf8; }
 .game[data-theme="cards"] { --x: #a78bfa; --o: #f472b6; }
 
+.titlebar {
+  position: relative;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sound {
+  position: absolute;
+  right: 0;
+  width: 38px;
+  height: 38px;
+  border: none;
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+
+.sound:hover { background: var(--surface-hi); }
+.sound[aria-pressed="false"] { opacity: 0.45; }
+
 h1 {
   font-size: 1.75rem;
   font-weight: 700;
