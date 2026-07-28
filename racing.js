@@ -62,69 +62,84 @@ const FINISH_SEGMENTS = 4;       // how much of the track is checkered
 
 const RIVAL_COLOURS = ['#38bdf8', '#c084fc', '#34d399', '#fb7185', '#f472b6', '#f97316', '#a3e635'];
 
-// Every car on the grid is the same chassis, at the same size — the field is
-// identical bodywork in different colours, and the only thing separating them
-// is how they drive.
-const CAR_SIZE = { width: 360, height: 330 };
+// Every car is the same size — wide and low, the stance of a modern saloon.
+const CAR_SIZE = { width: 360, height: 250 };
 const CAR_HALF_WIDTH = CAR_SIZE.width / (2 * ROAD_WIDTH);
 
-// The one silhouette every car is drawn from: a rounded cartoon shape with a
-// high domed roof, bulged rear haunches and a big glasshouse. Vertical values
-// are fractions of the car's height (0 at the roof, 1 at the road); horizontal
-// ones are fractions of its half-width.
+// Proportions shared by every car. Vertical values are fractions of the car's
+// height (0 at the roof, 1 at the road); horizontal ones are fractions of its
+// half-width.
 const CAR_PROFILE = {
-  roofY: 0.30,        // where the dome meets the shoulders
-  waistY: 0.50,       // window line
-  hipY: 0.76,         // widest point, over the wheels
-  skirtY: 0.68,       // start of the shaded lower panel
-  rockerY: 0.84,      // bottom of the bodywork — the car sits ON its wheels,
-                      // so this stops short of the road
-  shoulder: 0.72,
-  hip: 1.0,
-  rocker: 0.86,
-  glassTop: 0.10,
-  glassBottom: 0.48,
-  glassHalf: 0.60,
-  // Under the haunches with the tread meeting the road: the top half hides
-  // behind the bodywork and the bottom shows in the gap beneath it.
-  wheel: { x: 0.78, y: 0.82, radius: 0.16 },
-  lights: { y: 0.56, half: 0.86, w: 0.13, h: 0.1 },
-  bumper: { y: 0.72, half: 0.82, h: 0.08 },
+  deckY: 0.40,        // top of the boot lid, where the glass ends
+  lightY: 0.53,       // tail light centre line
+  hipY: 0.68,         // widest point, over the rear wheels
+  bumperY: 0.66,      // top of the bumper face
+  valanceY: 0.83,     // lower valance and diffuser
+  bodyBottom: 0.90,
+  shoulderHalf: 0.97,
+  hipHalf: 1.0,
+  bumperHalf: 0.95,
+  valanceHalf: 0.8,
+  wheel: { x: 0.9, y: 0.84, radius: 0.15 },
+  plate: { y: 0.7, w: 0.4, h: 0.1 },
 };
 
-/* The roster. Every entry is a set of numbers, not a look:
+/* Five rear ends. Same chassis underneath — these only change how a car looks:
+
+   glassTop/roofHalf  how far the roof runs back and how wide it stays
+   lights             'connected' slim lamps joined by a dark strip,
+                      'lshape' wrapping the corner, 'corner' stubby outboard
+                      units, 'bar' a wide pair, 'fullbar' one lit strip
+   exhausts           round2 | quad | single | none
+   spoiler            height of the boot lip */
+const CAR_LOOKS = {
+  grancoupe: { glassTop: 0.06, glassHalf: 0.62, roofHalf: 0.5, lights: 'connected', exhausts: 'round2', spoiler: 0.4, diffuser: true },
+  sport: { glassTop: 0.08, glassHalf: 0.58, roofHalf: 0.44, lights: 'lshape', exhausts: 'quad', spoiler: 0.75, diffuser: true },
+  hatch: { glassTop: 0.04, glassHalf: 0.68, roofHalf: 0.58, lights: 'corner', exhausts: 'single', spoiler: 0.25, diffuser: false },
+  estate: { glassTop: 0.02, glassHalf: 0.74, roofHalf: 0.66, lights: 'bar', exhausts: 'round2', spoiler: 0.15, diffuser: false },
+  electric: { glassTop: 0.07, glassHalf: 0.64, roofHalf: 0.52, lights: 'fullbar', exhausts: 'none', spoiler: 0.3, diffuser: false },
+};
+
+/* The roster:
 
    power      engine force from a standstill, in world units/s^2
    powerBand  how far up the speed range that force holds on — the closest
               thing to a "top speed", since nothing is capped
    grip       steering response, and how well it resists being pushed wide
    braking    stopping force multiplier
+   look       which rear end from CAR_LOOKS it wears
 
-   No two cars share a value on any axis, so each one is a distinct package. */
+   No two cars share a value on any axis, so each one is a distinct package,
+   and each wears a different body. */
 const CAR_MODELS = [
   {
     id: 'veloce', label: 'Veloce GT',
-    blurb: 'Balanced all-rounder',
+    blurb: 'Gran coupe — balanced all-rounder',
+    look: 'grancoupe',
     power: 6000, powerBand: 21000, grip: 1.06, braking: 1.0,
   },
   {
     id: 'strato', label: 'Strato SV',
-    blurb: 'Long-geared V12 missile',
+    blurb: 'Sport saloon — long-geared V12',
+    look: 'sport',
     power: 5600, powerBand: 31000, grip: 0.88, braking: 0.92,
   },
   {
     id: 'volt', label: 'Volt RS',
     blurb: 'Electric — brutal off the line',
+    look: 'electric',
     power: 8600, powerBand: 14500, grip: 1.16, braking: 1.16,
   },
   {
     id: 'aurora', label: 'Aurora Club',
-    blurb: 'Featherweight — grips and stops',
+    blurb: 'Hot hatch — grips and stops best',
+    look: 'hatch',
     power: 5400, powerBand: 17500, grip: 1.32, braking: 1.28,
   },
   {
     id: 'titan', label: 'Titan One',
-    blurb: 'Hypercar — endless top end',
+    blurb: 'Long-roof estate — endless top end',
+    look: 'estate',
     power: 6500, powerBand: 36000, grip: 0.83, braking: 0.86,
   },
 ];
@@ -1056,81 +1071,110 @@ function mountRacing(ctx) {
     g.restore();
   }
 
-  /* A rounded cartoon car, seen from behind.
+  /* The back of a modern car.
 
-     Flat fills rather than metallic gradients: a body colour, one lighter
-     highlight and one darker skirt, exactly like a vector illustration. The
-     silhouette is a single dome — bulging out over the rear wheels and curving
-     up to a high roof — with a big soft-cornered rear screen in a thick dark
-     frame. Every detail is gated on on-screen size so distant cars stay clean. */
+     Wide and low: a tapered glasshouse over a boot lid, slim tail lights
+     sweeping in toward a dark trim strip that links them across the centre, a
+     bumper carrying the number plate, and a valance with exhausts below it.
+     CAR_PROFILE fixes the proportions every car shares; each model's `look`
+     varies the roofline, light signature, spoiler and pipes. Detail is gated
+     on on-screen size so distant cars stay clean. */
   function drawCar(x, y, w, h, colour, model, options = {}) {
     const { braking = false } = options;
     const p = CAR_PROFILE;
-    const detailed = w > 34;
-    const mid = w > 15;
+    const look = CAR_LOOKS[model.look] || CAR_LOOKS.grancoupe;
+    const detailed = w > 40;
+    const mid = w > 18;
 
     const half = w / 2;
     const at = (v) => y + h * v;
     const across = (f) => x + half * f;
+    const r = Math.max(0.6, w * 0.02);
 
-    const light = shade(colour, 0.26);
-    const dark = shade(colour, -0.2);
-    const ground = at(p.rockerY);
+    const glassTop = at(look.glassTop);
+    const deck = at(p.deckY);
 
-    /* --- shadow -------------------------------------------------------- */
-    g.fillStyle = 'rgba(2, 6, 23, 0.4)';
+    /* --- shadow --------------------------------------------------------- */
+    g.fillStyle = 'rgba(2, 6, 23, 0.42)';
     g.beginPath();
-    g.ellipse(x, at(0.99), half * 1.05, h * 0.07, 0, 0, Math.PI * 2);
+    g.ellipse(x, at(0.985), half * 1.04, h * 0.055, 0, 0, Math.PI * 2);
     g.fill();
 
-    /* --- wheels, peeking out either side ------------------------------- */
+    /* --- rear tyres ----------------------------------------------------- */
     if (mid) {
       const radius = h * p.wheel.radius;
       const wy = at(p.wheel.y);
       for (const side of [-1, 1]) {
         const wx = across(side * p.wheel.x);
-        g.fillStyle = '#27272a';                       // tyre
+        g.fillStyle = '#1c1c1f';
         g.beginPath();
-        g.arc(wx, wy, radius, 0, Math.PI * 2);
+        g.ellipse(wx, wy, radius * 0.72, radius, 0, 0, Math.PI * 2);
         g.fill();
-
-        if (detailed) {
-          g.fillStyle = '#9ca3af';                     // rim
-          g.beginPath();
-          g.arc(wx, wy, radius * 0.5, 0, Math.PI * 2);
-          g.fill();
-          g.fillStyle = '#6b7280';                     // hub
-          g.beginPath();
-          g.arc(wx, wy, radius * 0.2, 0, Math.PI * 2);
-          g.fill();
-          g.fillStyle = '#d1d5db';                     // lug bolts
-          g.beginPath();
-          for (let i = 0; i < 6; i++) {
-            const a = (i / 6) * Math.PI * 2;
-            const bx = wx + Math.cos(a) * radius * 0.37;
-            const by = wy + Math.sin(a) * radius * 0.37;
-            g.moveTo(bx + radius * 0.07, by);
-            g.arc(bx, by, radius * 0.07, 0, Math.PI * 2);
-          }
-          g.fill();
-        }
       }
     }
 
-    /* --- body: one bulging dome ---------------------------------------- */
-    const bodyPath = () => {
+    /* --- glasshouse ------------------------------------------------------ */
+    const pillar = () => {
       g.beginPath();
-      g.moveTo(across(-p.rocker), ground);
-      g.quadraticCurveTo(across(-p.hip), at(p.hipY), across(-p.hip), at(p.waistY));
-      g.quadraticCurveTo(across(-p.hip), at(p.roofY + 0.1), across(-p.shoulder), at(p.roofY));
-      g.quadraticCurveTo(across(-p.shoulder * 0.45), at(0), across(0), at(0));
-      g.quadraticCurveTo(across(p.shoulder * 0.45), at(0), across(p.shoulder), at(p.roofY));
-      g.quadraticCurveTo(across(p.hip), at(p.roofY + 0.1), across(p.hip), at(p.waistY));
-      g.quadraticCurveTo(across(p.hip), at(p.hipY), across(p.rocker), ground);
+      g.moveTo(across(-look.glassHalf - 0.06), deck);
+      g.quadraticCurveTo(across(-look.glassHalf), glassTop, across(-look.roofHalf), glassTop);
+      g.lineTo(across(look.roofHalf), glassTop);
+      g.quadraticCurveTo(across(look.glassHalf), glassTop, across(look.glassHalf + 0.06), deck);
       g.closePath();
     };
 
-    g.fillStyle = colour;
+    g.fillStyle = shade(colour, -0.3);          // C-pillars and roof edge
+    pillar();
+    g.fill();
+
+    if (mid) {                                   // tinted screen
+      const glass = g.createLinearGradient(0, glassTop, 0, deck);
+      glass.addColorStop(0, 'rgba(120, 150, 180, 0.55)');
+      glass.addColorStop(0.5, 'rgba(24, 34, 52, 0.92)');
+      glass.addColorStop(1, 'rgba(12, 18, 30, 0.95)');
+      // Inset well inside the pillars so a band of bodywork frames the screen.
+      g.fillStyle = glass;
+      g.beginPath();
+      g.moveTo(across(-look.glassHalf + 0.07), deck - h * 0.03);
+      g.quadraticCurveTo(across(-look.glassHalf + 0.09), glassTop + h * 0.06,
+        across(-look.roofHalf + 0.07), glassTop + h * 0.05);
+      g.lineTo(across(look.roofHalf - 0.07), glassTop + h * 0.05);
+      g.quadraticCurveTo(across(look.glassHalf - 0.09), glassTop + h * 0.06,
+        across(look.glassHalf - 0.07), deck - h * 0.03);
+      g.closePath();
+      g.fill();
+
+      if (detailed) {                            // reflection across the screen
+        g.fillStyle = 'rgba(186, 210, 236, 0.14)';
+        g.beginPath();
+        g.moveTo(across(-look.glassHalf + 0.07), deck - h * 0.03);
+        g.lineTo(across(-look.roofHalf * 0.2), glassTop + h * 0.05);
+        g.lineTo(across(look.roofHalf * 0.25), glassTop + h * 0.05);
+        g.lineTo(across(-look.glassHalf * 0.3), deck - h * 0.03);
+        g.closePath();
+        g.fill();
+      }
+    }
+
+    /* --- boot lid and flanks -------------------------------------------- */
+    const bodyPath = () => {
+      g.beginPath();
+      g.moveTo(across(-p.shoulderHalf), deck + h * 0.04);
+      g.quadraticCurveTo(across(-p.hipHalf), at(p.hipY * 0.9), across(-p.hipHalf), at(p.hipY));
+      g.lineTo(across(-p.bumperHalf), at(p.bodyBottom));
+      g.lineTo(across(p.bumperHalf), at(p.bodyBottom));
+      g.lineTo(across(p.hipHalf), at(p.hipY));
+      g.quadraticCurveTo(across(p.hipHalf), at(p.hipY * 0.9), across(p.shoulderHalf), deck + h * 0.04);
+      g.quadraticCurveTo(across(0), deck - h * 0.03, across(-p.shoulderHalf), deck + h * 0.04);
+      g.closePath();
+    };
+
+    // Panel shading: lit across the top of the boot, falling away at the hips.
+    const panel = g.createLinearGradient(0, deck, 0, at(p.bodyBottom));
+    panel.addColorStop(0, shade(colour, 0.2));
+    panel.addColorStop(0.35, colour);
+    panel.addColorStop(1, shade(colour, -0.3));
+    g.fillStyle = panel;
     bodyPath();
     g.fill();
 
@@ -1139,94 +1183,157 @@ function mountRacing(ctx) {
       bodyPath();
       g.clip();
 
-      g.fillStyle = dark;                              // shaded skirt
-      g.fillRect(across(-1.1), at(p.skirtY), w * 1.1, h);
+      const flank = g.createLinearGradient(across(-1), 0, across(1), 0);
+      flank.addColorStop(0, 'rgba(2, 6, 23, 0.4)');
+      flank.addColorStop(0.2, 'rgba(2, 6, 23, 0)');
+      flank.addColorStop(0.8, 'rgba(2, 6, 23, 0)');
+      flank.addColorStop(1, 'rgba(2, 6, 23, 0.45)');
+      g.fillStyle = flank;
+      g.fillRect(across(-1.1), deck, w * 1.1, h);
 
-      g.fillStyle = light;                             // highlight sweeps
-      g.beginPath();
-      g.ellipse(across(-0.34), at(p.waistY + 0.12), half * 0.4, h * 0.055,
-        -0.22, 0, Math.PI * 2);
-      g.fill();
-      if (detailed) {
-        g.beginPath();
-        g.ellipse(across(0.46), at(p.waistY + 0.2), half * 0.24, h * 0.035,
-          0.2, 0, Math.PI * 2);
+      if (detailed) {                            // shoulder crease
+        g.fillStyle = 'rgba(248, 250, 252, 0.16)';
+        roundRect(across(-p.shoulderHalf * 0.92), deck + h * 0.035,
+          half * p.shoulderHalf * 1.84, h * 0.012, r);
         g.fill();
       }
       g.restore();
     }
 
-    /* --- rear screen ---------------------------------------------------- */
-    if (mid) {
-      const glassBottom = at(p.glassBottom);
-      const glassPath = () => {
-        g.beginPath();
-        g.moveTo(across(-p.glassHalf), glassBottom);
-        g.quadraticCurveTo(across(-p.glassHalf), at(p.glassTop + 0.04),
-          across(-p.glassHalf * 0.62), at(p.glassTop));
-        g.lineTo(across(p.glassHalf * 0.62), at(p.glassTop));
-        g.quadraticCurveTo(across(p.glassHalf), at(p.glassTop + 0.04),
-          across(p.glassHalf), glassBottom);
-        g.closePath();
-      };
-
-      g.strokeStyle = '#1c1c1c';                       // thick frame
-      g.lineJoin = 'round';
-      g.lineWidth = Math.max(1, w * 0.035);
-      glassPath();
-      g.stroke();
-
-      g.fillStyle = '#a9c6cb';                         // tinted glass
-      glassPath();
+    /* --- boot lip spoiler ------------------------------------------------ */
+    if (look.spoiler > 0.1 && mid) {
+      g.fillStyle = shade(colour, 0.1);
+      roundRect(across(-p.shoulderHalf * 0.97), deck - h * 0.055 * look.spoiler,
+        half * p.shoulderHalf * 1.94, h * 0.06 * look.spoiler + h * 0.02, r);
       g.fill();
-
-      if (detailed) {                                  // lighter reflection band
-        g.save();
-        glassPath();
-        g.clip();
-        g.fillStyle = '#c3dade';
-        g.beginPath();
-        g.moveTo(across(-p.glassHalf), glassBottom);
-        g.lineTo(across(-p.glassHalf * 0.1), at(p.glassTop));
-        g.lineTo(across(p.glassHalf * 0.3), at(p.glassTop));
-        g.lineTo(across(-p.glassHalf * 0.35), glassBottom);
-        g.closePath();
-        g.fill();
-        g.restore();
-      }
     }
 
-    /* --- tail lights, bumper -------------------------------------------- */
-    const lampY = at(p.lights.y);
-    const lamp = braking ? '#fda4a4' : '#e8402a';
+    /* --- tail lights ----------------------------------------------------- */
+    const lampY = at(p.lightY);
+    const lampH = Math.max(1.4, h * 0.085);
+    const lamp = braking ? '#ff6b6b' : '#d92d20';
+    const inner = braking ? '#ffd0d0' : '#f87171';
 
     if (mid) {
-      g.fillStyle = lamp;
-      for (const side of [-1, 1]) {
-        roundRect(across(side * p.lights.half) - (side > 0 ? 0 : w * p.lights.w),
-          lampY, w * p.lights.w, h * p.lights.h, Math.max(0.8, w * 0.02));
+      // Dark trim strip linking the two lamps across the boot.
+      // Everything here stays inside `edge` — the bodywork's own outline at the
+      // light line. Overshoot it and the lamps paint onto the road.
+      const edge = p.shoulderHalf * 0.9;
+      const reach = look.lights === 'corner' ? 0.5 : 0.3;
+
+      if (look.lights === 'connected' || look.lights === 'fullbar') {
+        g.fillStyle = look.lights === 'fullbar' ? lamp : '#111116';
+        roundRect(across(-edge), lampY - lampH * 0.26,
+          half * edge * 2, lampH * 0.62, lampH * 0.26);
         g.fill();
       }
-      if (detailed && braking) {
-        g.globalAlpha = 0.4;
-        for (const side of [-1, 1]) {
-          roundRect(across(side * p.lights.half) - (side > 0 ? w * 0.02 : w * p.lights.w + w * 0.02),
-            lampY - h * 0.03, w * (p.lights.w + 0.04), h * (p.lights.h + 0.06),
-            Math.max(0.8, w * 0.03));
+
+      // A slim horizontal lamp, tapering slightly toward the centre.
+      const blade = (outerF, innerF, top, bottom, taper) => {
+        g.beginPath();
+        g.moveTo(across(outerF), lampY - top);
+        g.lineTo(across(innerF), lampY - top * taper);
+        g.lineTo(across(innerF), lampY + bottom * taper);
+        g.lineTo(across(outerF), lampY + bottom);
+        g.closePath();
+        g.fill();
+      };
+
+      for (const side of [-1, 1]) {
+        g.fillStyle = lamp;
+        if (look.lights === 'lshape') {           // hooks down round the corner
+          g.beginPath();
+          g.moveTo(across(side * edge), lampY - lampH * 0.45);
+          g.lineTo(across(side * reach), lampY - lampH * 0.2);
+          g.lineTo(across(side * reach), lampY + lampH * 0.3);
+          g.lineTo(across(side * edge * 0.78), lampY + lampH * 0.35);
+          g.lineTo(across(side * edge * 0.78), lampY + lampH * 1.0);
+          g.lineTo(across(side * edge), lampY + lampH * 1.0);
+          g.closePath();
           g.fill();
+        } else {
+          blade(side * edge, side * reach, lampH * 0.45, lampH * 0.45, 0.62);
         }
+
+        if (detailed) {                           // bright LED core inside it
+          g.fillStyle = inner;
+          blade(side * edge * 0.97, side * (reach + 0.04), lampH * 0.2, lampH * 0.12, 0.5);
+        }
+      }
+
+      if (detailed) {                             // glow, clipped to the tail
+        g.globalAlpha = braking ? 0.4 : 0.16;
+        g.fillStyle = lamp;
+        roundRect(across(-edge), lampY - lampH * 0.7,
+          half * edge * 2, lampH * 1.7, lampH * 0.6);
+        g.fill();
         g.globalAlpha = 1;
+      }
+
+      if (detailed) {                             // badge
+        g.fillStyle = 'rgba(226, 232, 240, 0.85)';
+        g.beginPath();
+        g.arc(x, lampY + lampH * 0.15, Math.max(0.8, w * 0.018), 0, Math.PI * 2);
+        g.fill();
       }
     } else {
       g.fillStyle = lamp;
-      g.fillRect(across(-0.7), lampY, w * 0.7, Math.max(1, h * p.lights.h));
+      g.fillRect(across(-0.8), lampY, w * 0.8, Math.max(1, lampH * 0.6));
+    }
+
+    /* --- bumper, plate, valance, pipes ----------------------------------- */
+    if (mid) {
+      g.fillStyle = shade(colour, -0.16);         // bumper face
+      roundRect(across(-p.bumperHalf), at(p.bumperY), half * p.bumperHalf * 2,
+        h * (p.bodyBottom - p.bumperY), r * 1.4);
+      g.fill();
+
+      if (detailed) {                             // number plate
+        g.fillStyle = '#e8eaed';
+        roundRect(across(-p.plate.w), at(p.plate.y), half * p.plate.w * 2, h * p.plate.h, r * 0.8);
+        g.fill();
+        g.fillStyle = '#1e3a8a';
+        g.fillRect(across(-p.plate.w) + w * 0.006, at(p.plate.y) + h * 0.008,
+          w * 0.018, h * p.plate.h - h * 0.016);
+      }
     }
 
     if (detailed) {
-      g.fillStyle = '#9ca3af';                         // chrome bumper
-      roundRect(across(-p.bumper.half), at(p.bumper.y),
-        half * p.bumper.half * 2, h * p.bumper.h, Math.max(1, w * 0.025));
+      g.fillStyle = '#17171b';                    // valance / diffuser
+      roundRect(across(-p.valanceHalf), at(p.valanceY), half * p.valanceHalf * 2,
+        h * (p.bodyBottom - p.valanceY) + h * 0.02, r);
       g.fill();
+
+      if (look.diffuser) {
+        g.fillStyle = '#2b2b33';
+        for (let i = -2; i <= 2; i++) {
+          g.fillRect(across(i * 0.16) - w * 0.008, at(p.valanceY) + h * 0.012,
+            w * 0.016, h * (p.bodyBottom - p.valanceY) - h * 0.01);
+        }
+      }
+
+      const pipe = h * 0.032;
+      const tips = { round2: [-0.62, 0.62], quad: [-0.66, -0.48, 0.48, 0.66], single: [0.6], none: [] };
+      const spots = tips[look.exhausts] || [];
+      for (const f of spots) {
+        g.fillStyle = '#c9cdd4';                  // chrome tip
+        g.beginPath();
+        g.ellipse(across(f), at(p.valanceY) + h * 0.035, pipe * (look.exhausts === 'quad' ? 0.8 : 1.15),
+          pipe * 0.85, 0, 0, Math.PI * 2);
+        g.fill();
+        g.fillStyle = '#0b0b0e';
+        g.beginPath();
+        g.ellipse(across(f), at(p.valanceY) + h * 0.035, pipe * (look.exhausts === 'quad' ? 0.5 : 0.75),
+          pipe * 0.52, 0, 0, Math.PI * 2);
+        g.fill();
+      }
+
+      g.fillStyle = '#7f1d1d';                    // corner reflectors
+      for (const side of [-1, 1]) {
+        roundRect(across(side * p.bumperHalf * 0.9) - (side > 0 ? w * 0.05 : 0),
+          at(p.valanceY) - h * 0.05, w * 0.05, h * 0.02, r * 0.5);
+        g.fill();
+      }
     }
   }
 
@@ -1386,6 +1493,6 @@ if (typeof module !== 'undefined') {
     RACE_MAPS, RACE_W, RACE_H, RIVAL_COUNT, COUNTDOWN, OFF_ROAD_LIMIT,
     CAR_MODELS, CAR_PAINTS, STEER_RATE, STEER_AUTHORITY, CENTRIFUGAL,
     REFERENCE_KMH, RACE_LAPS, DRAW_DISTANCE, DRAFT_RANGE,
-    CAR_SIZE, CAR_HALF_WIDTH, CAR_PROFILE, PLAYER_DRAW,
+    CAR_SIZE, CAR_HALF_WIDTH, CAR_PROFILE, CAR_LOOKS, PLAYER_DRAW,
   };
 }
