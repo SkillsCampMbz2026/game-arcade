@@ -14,12 +14,19 @@ const shell = {
 
 let session = null;
 
+/* Fullscreen. By default the whole page goes fullscreen, which suits the board
+   games and the canvas ones. A game can instead nominate one element — the
+   maze points at its 3D viewport, because it also wants the pointer lock that
+   comes with fullscreening just the view. Cleared on every game switch. */
+let fullscreenTarget = null;
+
 function gameContext() {
   return {
     settings: shell.settings,
     score: shell.score,
     stage: shell.stage,
     controls: shell.controls,
+    setFullscreenTarget: (el) => { fullscreenTarget = el || null; },
     setHint: (text) => { shell.hint.textContent = text; },
     setStatus: (text, highlight = false) => {
       shell.status.textContent = text;
@@ -42,6 +49,8 @@ function selectGame(id) {
   shell.status.textContent = '';
   shell.status.classList.remove('status--win');
   shell.root.dataset.theme = '';
+  fullscreenTarget = null;
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
 
   const game = GAME_REGISTRY.find((g) => g.id === id) || GAME_REGISTRY[0];
   shell.root.classList.toggle('game--wide', Boolean(game.wide));
@@ -52,6 +61,7 @@ function selectGame(id) {
 }
 
 const soundBtn = document.getElementById('sound');
+const fullscreenBtn = document.getElementById('fullscreen');
 
 function paintSoundButton() {
   soundBtn.textContent = audio.enabled ? '🔊' : '🔇';
@@ -64,6 +74,30 @@ soundBtn.addEventListener('click', () => {
 });
 
 paintSoundButton();
+
+function paintFullscreenButton() {
+  const on = Boolean(document.fullscreenElement);
+  fullscreenBtn.setAttribute('aria-pressed', String(on));
+  fullscreenBtn.title = on ? 'Leave fullscreen' : 'Fullscreen';
+}
+
+// Hide the control outright where the browser has no Fullscreen API rather
+// than offering a button that does nothing.
+if (typeof document.documentElement.requestFullscreen !== 'function') {
+  fullscreenBtn.hidden = true;
+} else {
+  fullscreenBtn.addEventListener('click', () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+      return;
+    }
+    const target = fullscreenTarget || document.documentElement;
+    if (target.requestFullscreen) target.requestFullscreen().catch(() => {});
+  });
+
+  document.addEventListener('fullscreenchange', paintFullscreenButton);
+  paintFullscreenButton();
+}
 
 const picker = segmented(
   GAME_REGISTRY.map((game) => ({ id: game.id, label: game.label })),

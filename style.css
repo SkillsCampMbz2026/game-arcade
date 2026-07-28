@@ -56,7 +56,7 @@ body {
   justify-content: center;
 }
 
-.sound {
+.chip {
   position: absolute;
   right: 0;
   width: 38px;
@@ -71,8 +71,13 @@ body {
   transition: background 0.15s, opacity 0.15s;
 }
 
-.sound:hover { background: var(--surface-hi); }
-.sound[aria-pressed="false"] { opacity: 0.45; }
+.chip--left { right: 46px; }
+
+.chip:hover { background: var(--surface-hi); }
+.chip[hidden] { display: none; }
+
+#sound[aria-pressed="false"] { opacity: 0.45; }
+#fullscreen[aria-pressed="true"] { background: var(--surface-hi); color: var(--x); }
 
 h1 {
   font-size: 1.75rem;
@@ -581,4 +586,10 @@ h1 {
   width: 190px;
   top: 18px;
   right: 18px;
+}
+
+/* Whole-page fullscreen, used by every game except the maze */
+html:fullscreen {
+  background: var(--bg);
+  overflow-y: auto;
 }

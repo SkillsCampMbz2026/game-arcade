@@ -248,12 +248,12 @@ function mountMaze(ctx) {
   ctx.settings.append(courseRow.el);
   ctx.score.append(scoreRow.el);
   ctx.stage.append(view, pad);
-  ctx.controls.append(buttonRow([
-    { label: 'New Run', onClick: restart },
-    { label: 'Fullscreen', onClick: toggleFullscreen, ghost: true },
-  ]));
+  ctx.controls.append(buttonRow([{ label: 'New Run', onClick: restart }]));
+  // The shell's fullscreen button drives the 3D view rather than the whole
+  // page, so going fullscreen also grabs the pointer for mouse look.
+  ctx.setFullscreenTarget(view);
   ctx.setTheme('maze');
-  ctx.setHint('W / ↑ walk · A D or ← → turn · fullscreen for mouse look');
+  ctx.setHint('W / ↑ walk · A D or ← → turn · ⛶ fullscreen for mouse look');
 
   function setInput(dir, down) {
     if (dir === 'up') input.forward = down;
@@ -533,16 +533,8 @@ function mountMaze(ctx) {
      fullscreen releases it, so the mouse goes back to being an ordinary
      cursor. The browser drops pointer lock by itself on exit; the listener
      below just keeps our own flag and the status line honest. */
-  const canFullscreen = typeof view.requestFullscreen === 'function';
-
   function inFullscreen() {
     return document.fullscreenElement === view;
-  }
-
-  function toggleFullscreen() {
-    if (!canFullscreen) return;
-    if (inFullscreen()) document.exitFullscreen();
-    else view.requestFullscreen().catch(() => {});
   }
 
   function onFullscreenChange() {

@@ -65,7 +65,8 @@ straight from a `file://` page, where module imports are blocked by CORS. It is
 page load, and the game degrades to a message plus the minimap if WebGL is
 unavailable.
 
-Press **Fullscreen** and the pointer locks, so the mouse steers the camera —
+The ⛶ button in the title bar fullscreens the maze view and locks the pointer,
+so the mouse steers the camera —
 leave fullscreen and it releases, and the mouse is an ordinary cursor again.
 Keyboard turning works either way.
 
@@ -76,6 +77,13 @@ from 10x10 up to 38x38.
 
 Maze generation is a recursive backtracker, which produces a *perfect* maze:
 every square reachable, exactly one route between any two points, no loops.
+
+## Fullscreen
+
+The ⛶ button in the title bar works in every game. Most fullscreen the whole
+page; the maze points it at its 3D viewport instead, so going fullscreen there
+also grabs the pointer for mouse look. It hides itself in browsers without the
+Fullscreen API.
 
 ## Sound
 
