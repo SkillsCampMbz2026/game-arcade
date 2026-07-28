@@ -11,11 +11,16 @@
 
 const THREE_SRC = 'vendor/three.min.js';
 
-const MAZE_SIZES = [
-  { id: 'small', label: 'Small', cols: 8, rows: 8 },
-  { id: 'medium', label: 'Medium', cols: 12, rows: 12 },
-  { id: 'large', label: 'Large', cols: 16, rows: 16 },
+/* A course is a run of mazes to finish, each bigger than the last. Escaping
+   one drops you straight into the next; the clock runs across the whole run,
+   and only completing every maze counts as finishing the course. */
+const MAZE_COURSES = [
+  { id: 'sprint', label: 'Sprint', levels: [5, 7, 9] },
+  { id: 'standard', label: 'Standard', levels: [5, 7, 9, 11, 13] },
+  { id: 'marathon', label: 'Marathon', levels: [5, 7, 9, 11, 13, 15, 17, 19] },
 ];
+
+const courseById = (id) => MAZE_COURSES.find((c) => c.id === id) || MAZE_COURSES[1];
 
 const WALKER_RADIUS = 0.26;    // in cells; keeps you off the wall faces
 const WALK_SPEED = 2.6;        // cells per second
@@ -184,9 +189,11 @@ function webglAvailable() {
 }
 
 function mountMaze(ctx) {
-  let size = MAZE_SIZES[1];
-  let maze = buildMaze(size.cols, size.rows);
+  let course = MAZE_COURSES[1];
+  let level = 0;                     // which maze of the course you are on
+  let maze = buildMaze(course.levels[0], course.levels[0]);
   let walker = createWalker(maze);
+  let courseDone = false;
   let scene = null;
   let camera = null;
   let renderer = null;
@@ -197,20 +204,21 @@ function mountMaze(ctx) {
   let destroyed = false;
   const input = { forward: false, back: false, left: false, right: false };
 
-  const bestKey = () => `maze-best-${size.id}`;
+  const bestKey = () => `maze-best-${course.id}`;
   const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
   /* ---------- chrome ---------- */
 
-  const sizeRow = segmented(
-    MAZE_SIZES.map((s) => ({ id: s.id, label: s.label })),
-    size.id, (id) => { size = MAZE_SIZES.find((s) => s.id === id); restart(); },
-    { ariaLabel: 'Maze size' });
+  const courseRow = segmented(
+    MAZE_COURSES.map((c) => ({ id: c.id, label: `${c.label} (${c.levels.length})` })),
+    course.id, (id) => { course = courseById(id); restart(); },
+    { ariaLabel: 'Course' });
 
   const scoreRow = statRow([
-    { key: 'time', label: 'Time', value: '0:00', tone: 'x' },
+    { key: 'level', label: 'Maze', value: '1', tone: 'x' },
+    { key: 'time', label: 'Total Time', value: '0:00', tone: 'muted' },
     { key: 'left', label: 'Shortest Route', value: '—', tone: 'muted' },
-    { key: 'best', label: 'Best', value: '—', tone: 'o' },
+    { key: 'best', label: 'Best Run', value: '—', tone: 'o' },
   ]);
 
   const view = document.createElement('div');
@@ -222,12 +230,12 @@ function mountMaze(ctx) {
 
   const pad = dpad((dir) => setInput(dir, true), { onRelease: (dir) => setInput(dir, false) });
 
-  ctx.settings.append(sizeRow.el);
+  ctx.settings.append(courseRow.el);
   ctx.score.append(scoreRow.el);
   ctx.stage.append(view, pad);
   ctx.controls.append(buttonRow([{ label: 'New Maze', onClick: restart }]));
   ctx.setTheme('maze');
-  ctx.setHint('W / ↑ walk · A D or ← → turn · S back · find the green exit');
+  ctx.setHint('W / ↑ walk · A D or ← → turn · S back · escape every maze in the course');
 
   function setInput(dir, down) {
     if (dir === 'up') input.forward = down;
@@ -317,7 +325,7 @@ function mountMaze(ctx) {
 
     const before = walker.escaped;
     stepWalker(maze, walker, input, dt);
-    if (!walker.escaped) seconds += dt;
+    if (!courseDone) seconds += dt;
 
     camera.position.set(walker.x, 0.55, walker.y);
     camera.rotation.set(0, -walker.yaw - Math.PI / 2, 0, 'YXZ');
@@ -328,15 +336,45 @@ function mountMaze(ctx) {
     if (walker.escaped && !before) escape();
   }
 
+  // Escaping one maze drops you straight into the next. The clock keeps
+  // running across the whole course; only the last one finishes the run.
   function escape() {
+    const last = level >= course.levels.length - 1;
+
+    if (!last) {
+      level += 1;
+      audio.play('match');
+      loadLevel();
+      ctx.setStatus(`Maze ${level + 1} of ${course.levels.length} — keep going`);
+      return;
+    }
+
     stop();
+    courseDone = true;
     audio.play('finish');
 
     const best = storage.get(bestKey());
     const isBest = !best || seconds < best;
     if (isBest) storage.set(bestKey(), seconds);
     scoreRow.set('best', clock(storage.get(bestKey(), seconds)));
-    ctx.setStatus(`Escaped in ${clock(seconds)}${isBest ? ' · new best!' : ''}`, true);
+    ctx.setStatus(
+      `Course complete — all ${course.levels.length} mazes in ${clock(seconds)}${isBest ? ' · new best!' : ''}`,
+      true);
+  }
+
+  // Builds the current level's maze without resetting the run's clock.
+  function loadLevel() {
+    const cells = course.levels[level];
+    maze = buildMaze(cells, cells);
+    walker = createWalker(maze);
+
+    const route = solveMaze(maze);
+    scoreRow.set('level', `${level + 1}/${course.levels.length}`);
+    scoreRow.set('left', route ? `${route.length} steps` : '—');
+    minimap.width = maze.w * 6;
+    minimap.height = maze.h * 6;
+
+    if (renderer) buildScene();
   }
 
   function start() {
@@ -354,22 +392,19 @@ function mountMaze(ctx) {
 
   function restart() {
     stop();
-    maze = buildMaze(size.cols, size.rows);
-    walker = createWalker(maze);
+    level = 0;
     seconds = 0;
+    courseDone = false;
     input.forward = input.back = input.left = input.right = false;
 
-    const route = solveMaze(maze);
-    scoreRow.set('left', route ? `${route.length} steps` : '—');
+    scoreRow.set('time', clock(0));
     scoreRow.set('best', storage.get(bestKey()) ? clock(storage.get(bestKey())) : '—');
-    minimap.width = maze.w * 6;
-    minimap.height = maze.h * 6;
+    loadLevel();
 
     if (!renderer) return;              // still loading, or unsupported
     view.replaceChildren(renderer.domElement, minimap);
-    buildScene();
     resize();
-    ctx.setStatus('Find the way out');
+    ctx.setStatus(`Maze 1 of ${course.levels.length} — find the way out`);
     start();
   }
 
@@ -466,6 +501,6 @@ if (typeof registerGame !== 'undefined') {
 if (typeof module !== 'undefined') {
   module.exports = {
     buildMaze, solveMaze, isWall, createWalker, stepWalker, moveWalker,
-    MAZE_SIZES, WALKER_RADIUS, WALK_SPEED, TURN_SPEED,
+    MAZE_COURSES, courseById, WALKER_RADIUS, WALK_SPEED, TURN_SPEED,
   };
 }

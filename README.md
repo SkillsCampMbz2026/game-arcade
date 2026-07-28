@@ -15,7 +15,7 @@ vendored in `vendor/` and loaded on demand by the maze.
 | **Matching Cards** | Four board sizes, solo against the clock or two players |
 | **Snake** | Three speeds and sizes, solid walls or wrap-around, saved best scores |
 | **Car Racing** | 3D perspective racer — 8 cars, 6 laps, 3 maps, pick your car and paint |
-| **Escape the Maze** | First-person maze in real 3D, three sizes, minimap, saved best times |
+| **Escape the Maze** | First-person 3D maze runs — finish 3, 5 or 8 mazes against the clock |
 
 ## The CPU opponents
 
@@ -64,6 +64,10 @@ straight from a `file://` page, where module imports are blocked by CORS. It is
 600 KB, so it is fetched the first time you open the maze rather than on every
 page load, and the game degrades to a message plus the minimap if WebGL is
 unavailable.
+
+A run is a **course**: escape one maze and you drop straight into the next,
+bigger one, with the clock running across the whole run. Only finishing every
+maze completes the course. Sprint is 3 mazes, Standard 5, Marathon 8.
 
 Maze generation is a recursive backtracker, which produces a *perfect* maze:
 every square reachable, exactly one route between any two points, no loops.
