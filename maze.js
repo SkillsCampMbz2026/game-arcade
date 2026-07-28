@@ -171,17 +171,38 @@ function stepWalker(maze, walker, input, dt) {
 
 /* ---------- the game module ---------- */
 
-// Fetches three.js once, on first use.
+/* Fetches three.js once, on first use. Resolves to a reason string on failure
+   rather than hanging: a script tag that never fires either event — a stalled
+   or blocked fetch — would otherwise leave the game on "Loading…" forever. */
+const THREE_TIMEOUT = 20000;
 let threeLoading = null;
+
 function loadThree() {
-  if (typeof THREE !== 'undefined') return Promise.resolve(true);
+  if (typeof THREE !== 'undefined') return Promise.resolve(null);
   if (threeLoading) return threeLoading;
 
   threeLoading = new Promise((resolve) => {
+    let settled = false;
+    const finish = (reason) => {
+      if (settled) return;
+      settled = true;
+      resolve(reason);
+    };
+
+    const timer = setTimeout(
+      () => finish('Timed out fetching the 3D engine.'), THREE_TIMEOUT);
+
     const tag = document.createElement('script');
     tag.src = THREE_SRC;
-    tag.onload = () => resolve(typeof THREE !== 'undefined');
-    tag.onerror = () => resolve(false);
+    tag.onload = () => {
+      clearTimeout(timer);
+      finish(typeof THREE === 'undefined' ? 'The 3D engine loaded but did not start.' : null);
+    };
+    tag.onerror = () => {
+      clearTimeout(timer);
+      finish(`Could not fetch ${THREE_SRC}.`);
+    };
+
     document.head.appendChild(tag);
   });
 
@@ -287,14 +308,35 @@ function makeTextures() {
   return textures;
 }
 
+/* Is WebGL usable? Answered once and remembered.
+
+   The probe has to give its context straight back. A browser only allows a
+   handful of live WebGL contexts (around 16), and a probe canvas that is
+   dropped without being released still holds one — so asking this question on
+   every visit slowly used them all up, after which creating the real renderer
+   started failing. */
+let webglSupport = null;
+
 function webglAvailable() {
+  if (webglSupport !== null) return webglSupport;
+
   try {
-    if (!window.WebGLRenderingContext) return false;
+    if (!window.WebGLRenderingContext) {
+      webglSupport = false;
+      return false;
+    }
     const probe = document.createElement('canvas');
-    return Boolean(probe.getContext('webgl') || probe.getContext('experimental-webgl'));
+    const gl = probe.getContext('webgl') || probe.getContext('experimental-webgl');
+    if (gl && gl.getExtension) {
+      const release = gl.getExtension('WEBGL_lose_context');
+      if (release) release.loseContext();
+    }
+    webglSupport = Boolean(gl);
   } catch {
-    return false;
+    webglSupport = false;
   }
+
+  return webglSupport;
 }
 
 function mountMaze(ctx) {
@@ -343,11 +385,11 @@ function mountMaze(ctx) {
 
   const pad = dpad((dir) => setInput(dir, true), { onRelease: (dir) => setInput(dir, false) });
 
-  // Shown in place of the 3D view when WebGL is missing.
-  function fallbackNote() {
+  // Shown in place of the 3D view when it cannot start.
+  function fallbackNote(reason) {
     const note = document.createElement('p');
     note.className = 'viewport__note';
-    note.textContent = 'The 3D view needs WebGL, which this browser has not enabled.';
+    note.textContent = reason || 'The 3D view needs WebGL, which this browser has not enabled.';
     return note;
   }
 
@@ -675,21 +717,31 @@ function mountMaze(ctx) {
 
   restart();   // sets up the maze and the stats even if 3D never arrives
 
+  // Anything that goes wrong here has to end in a message. Left unhandled, a
+  // failure would sit on "Loading the 3D engine…" indefinitely.
+  function giveUp(reason) {
+    ctx.setStatus(reason);
+    if (!view.querySelector('.viewport__note')) view.append(fallbackNote(reason));
+  }
+
   if (!webglAvailable()) {
-    ctx.setStatus('This browser has no WebGL, so the 3D view cannot run.');
-    view.append(fallbackNote());
+    giveUp('This browser has no WebGL, so the 3D view cannot run.');
   } else {
     ctx.setStatus('Loading the 3D engine…');
-    loadThree().then((ok) => {
-      if (destroyed) return;
-      if (!ok) {
-        ctx.setStatus('Could not load the 3D engine.');
-        view.append(fallbackNote());
-        return;
-      }
-      startRenderer();
-      restart();
-    });
+    loadThree()
+      .then((reason) => {
+        if (destroyed) return;
+        if (reason) {
+          giveUp(reason);
+          return;
+        }
+        startRenderer();     // may still throw: a probe passing does not
+        restart();           // guarantee a real context can be created
+      })
+      .catch((error) => {
+        if (destroyed) return;
+        giveUp(`The 3D view could not start: ${error && error.message ? error.message : error}`);
+      });
   }
 
   return {
@@ -703,7 +755,13 @@ function mountMaze(ctx) {
       document.removeEventListener('mousemove', onMouseMove);
       if (scene) disposeScene();
       window.removeEventListener('resize', resize);
-      if (renderer) renderer.dispose();
+      // Hand the WebGL context straight back. Disposing alone leaves it live
+      // until the collector runs, and the browser only allows a handful.
+      if (renderer) {
+        if (renderer.forceContextLoss) renderer.forceContextLoss();
+        renderer.dispose();
+        renderer = null;
+      }
     },
   };
 }
