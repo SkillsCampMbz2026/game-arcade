@@ -65,9 +65,14 @@ straight from a `file://` page, where module imports are blocked by CORS. It is
 page load, and the game degrades to a message plus the minimap if WebGL is
 unavailable.
 
+Press **Fullscreen** and the pointer locks, so the mouse steers the camera —
+leave fullscreen and it releases, and the mouse is an ordinary cursor again.
+Keyboard turning works either way.
+
 A run is a **course**: escape one maze and you drop straight into the next,
 bigger one, with the clock running across the whole run. Only finishing every
-maze completes the course. Sprint is 3 mazes, Standard 5, Marathon 8.
+maze completes the course. Sprint is 3 mazes, Standard 5, Marathon 8, ramping
+from 10x10 up to 38x38.
 
 Maze generation is a recursive backtracker, which produces a *perfect* maze:
 every square reachable, exactly one route between any two points, no loops.

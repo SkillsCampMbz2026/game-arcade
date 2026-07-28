@@ -15,16 +15,20 @@ const THREE_SRC = 'vendor/three.min.js';
    one drops you straight into the next; the clock runs across the whole run,
    and only completing every maze counts as finishing the course. */
 const MAZE_COURSES = [
-  { id: 'sprint', label: 'Sprint', levels: [5, 7, 9] },
-  { id: 'standard', label: 'Standard', levels: [5, 7, 9, 11, 13] },
-  { id: 'marathon', label: 'Marathon', levels: [5, 7, 9, 11, 13, 15, 17, 19] },
+  { id: 'sprint', label: 'Sprint', levels: [10, 14, 18] },
+  { id: 'standard', label: 'Standard', levels: [10, 14, 18, 22, 26] },
+  { id: 'marathon', label: 'Marathon', levels: [10, 14, 18, 22, 26, 30, 34, 38] },
 ];
 
 const courseById = (id) => MAZE_COURSES.find((c) => c.id === id) || MAZE_COURSES[1];
 
 const WALKER_RADIUS = 0.26;    // in cells; keeps you off the wall faces
-const WALK_SPEED = 2.6;        // cells per second
+const WALK_SPEED = 3.1;        // cells per second
 const TURN_SPEED = 2.4;        // radians per second
+const MOUSE_SENSITIVITY = 0.0026;
+const MAX_PITCH = 0.9;         // radians you can look up or down
+const WALL_HEIGHT = 2.1;
+const EYE_HEIGHT = 0.95;
 
 /* ---------- maze generation ---------- */
 
@@ -141,7 +145,11 @@ function moveWalker(maze, walker, dx, dy) {
 function stepWalker(maze, walker, input, dt) {
   if (walker.escaped) return walker;
 
-  const turn = (input.left ? 1 : 0) - (input.right ? 1 : 0);
+  /* Yaw 0 faces +x, and the renderer maps it to a camera looking along
+     (cos yaw, 0, sin yaw). With Y up that puts +z on the player's right, so
+     INCREASING yaw swings the view to the right — pressing "right" has to add.
+     Getting this backwards inverts the controls. */
+  const turn = (input.right ? 1 : 0) - (input.left ? 1 : 0);
   walker.yaw += turn * TURN_SPEED * dt;
 
   const drive = (input.forward ? 1 : 0) - (input.back ? 1 : 0);
@@ -197,10 +205,17 @@ function mountMaze(ctx) {
   let scene = null;
   let camera = null;
   let renderer = null;
+  let walls = null;
+  let torch = null;
+  let exitPillar = null;
+  let exitGlow = null;
+  let pitch = 0;          // mouse look up/down, radians
+  let mouseLook = false;  // only true while the pointer is locked
   let frame = null;
   let lastTime = 0;
   let seconds = 0;
   let running = false;
+  let bob = 0;
   let destroyed = false;
   const input = { forward: false, back: false, left: false, right: false };
 
@@ -233,9 +248,12 @@ function mountMaze(ctx) {
   ctx.settings.append(courseRow.el);
   ctx.score.append(scoreRow.el);
   ctx.stage.append(view, pad);
-  ctx.controls.append(buttonRow([{ label: 'New Maze', onClick: restart }]));
+  ctx.controls.append(buttonRow([
+    { label: 'New Run', onClick: restart },
+    { label: 'Fullscreen', onClick: toggleFullscreen, ghost: true },
+  ]));
   ctx.setTheme('maze');
-  ctx.setHint('W / ↑ walk · A D or ← → turn · S back · escape every maze in the course');
+  ctx.setHint('W / ↑ walk · A D or ← → turn · fullscreen for mouse look');
 
   function setInput(dir, down) {
     if (dir === 'up') input.forward = down;
@@ -247,17 +265,19 @@ function mountMaze(ctx) {
   /* ---------- three.js scene ---------- */
 
   function buildScene() {
+    if (scene) disposeScene();
+
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0b1020);
-    scene.fog = new THREE.Fog(0x0b1020, 2.5, 11);
+    scene.background = new THREE.Color(0x090d1a);
+    scene.fog = new THREE.Fog(0x090d1a, 3, 15);
 
-    camera = new THREE.PerspectiveCamera(72, 16 / 10, 0.05, 60);
+    camera = new THREE.PerspectiveCamera(75, 16 / 10, 0.05, 80);
 
-    const wallGeometry = new THREE.BoxGeometry(1, 1.6, 1);
-    const wallMaterial = new THREE.MeshLambertMaterial({ color: 0x64748b });
+    const wallGeometry = new THREE.BoxGeometry(1, WALL_HEIGHT, 1);
+    const wallMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
 
     // One InstancedMesh for every wall block: thousands of cubes in a single
-    // draw call, which keeps even the large maze smooth.
+    // draw call, which keeps even the largest maze smooth.
     const blocks = [];
     for (let y = 0; y < maze.h; y++) {
       for (let x = 0; x < maze.w; x++) {
@@ -265,36 +285,69 @@ function mountMaze(ctx) {
       }
     }
 
-    const walls = new THREE.InstancedMesh(wallGeometry, wallMaterial, blocks.length);
+    walls = new THREE.InstancedMesh(wallGeometry, wallMaterial, blocks.length);
     const placer = new THREE.Object3D();
+    const tint = new THREE.Color();
+
     blocks.forEach(([x, y], i) => {
-      placer.position.set(x + 0.5, 0.8, y + 0.5);
+      placer.position.set(x + 0.5, WALL_HEIGHT / 2, y + 0.5);
       placer.updateMatrix();
       walls.setMatrixAt(i, placer.matrix);
+
+      // Deterministic per-block shade so the stonework has texture rather than
+      // reading as one flat slab.
+      const noise = ((x * 73856093) ^ (y * 19349663)) % 100 / 100;
+      tint.setHSL(0.6, 0.12, 0.32 + noise * 0.16);
+      walls.setColorAt(i, tint);
     });
+
     walls.instanceMatrix.needsUpdate = true;
+    if (walls.instanceColor) walls.instanceColor.needsUpdate = true;
     scene.add(walls);
 
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(maze.w, maze.h),
-      new THREE.MeshLambertMaterial({ color: 0x1e293b }));
+      new THREE.MeshLambertMaterial({ color: 0x141c2e }));
     floor.rotation.x = -Math.PI / 2;
     floor.position.set(maze.w / 2, 0, maze.h / 2);
     scene.add(floor);
 
-    // The exit: a glowing green pillar you can pick out down a corridor.
-    const exit = new THREE.Mesh(
-      new THREE.BoxGeometry(0.7, 1.8, 0.7),
-      new THREE.MeshBasicMaterial({ color: 0x4ade80, transparent: true, opacity: 0.55 }));
-    exit.position.set(maze.exit.x + 0.5, 0.9, maze.exit.y + 0.5);
-    scene.add(exit);
-    scene.add(new THREE.PointLight(0x4ade80, 1.4, 6).translateY(1)
-      .translateX(maze.exit.x + 0.5).translateZ(maze.exit.y + 0.5));
+    // A ceiling turns open-topped trenches into real corridors.
+    const ceiling = new THREE.Mesh(
+      new THREE.PlaneGeometry(maze.w, maze.h),
+      new THREE.MeshLambertMaterial({ color: 0x0c1322 }));
+    ceiling.rotation.x = Math.PI / 2;
+    ceiling.position.set(maze.w / 2, WALL_HEIGHT, maze.h / 2);
+    scene.add(ceiling);
 
-    scene.add(new THREE.AmbientLight(0x94a3b8, 0.35));
-    const torch = new THREE.PointLight(0xfff1c9, 1.5, 7);
+    // The exit: a glowing pillar you can pick out from down a corridor.
+    exitPillar = new THREE.Mesh(
+      new THREE.BoxGeometry(0.62, WALL_HEIGHT * 0.95, 0.62),
+      new THREE.MeshBasicMaterial({ color: 0x4ade80, transparent: true, opacity: 0.6 }));
+    exitPillar.position.set(maze.exit.x + 0.5, WALL_HEIGHT / 2, maze.exit.y + 0.5);
+    scene.add(exitPillar);
+
+    exitGlow = new THREE.PointLight(0x4ade80, 2.2, 9);
+    exitGlow.position.set(maze.exit.x + 0.5, 1.2, maze.exit.y + 0.5);
+    scene.add(exitGlow);
+
+    scene.add(new THREE.AmbientLight(0x8ba0c4, 0.28));
+    torch = new THREE.PointLight(0xffd9a0, 2.1, 9, 1.6);
     camera.add(torch);
     scene.add(camera);
+  }
+
+  // three.js does not free GPU buffers on its own; rebuilding a maze every
+  // level would otherwise leak one whole scene each time.
+  function disposeScene() {
+    scene.traverse((node) => {
+      if (node.geometry) node.geometry.dispose();
+      if (node.material) {
+        const list = Array.isArray(node.material) ? node.material : [node.material];
+        list.forEach((m) => m.dispose());
+      }
+    });
+    if (camera) camera.clear();
   }
 
   function startRenderer() {
@@ -307,11 +360,16 @@ function mountMaze(ctx) {
 
   function resize() {
     if (!renderer || !camera) return;
-    const width = view.clientWidth || 640;
-    const height = Math.round(width * 0.62);
+
+    // Windowed the view keeps a fixed 0.62 letterbox; fullscreen it takes the
+    // screen's own shape, or the picture would come out stretched.
+    const full = inFullscreen();
+    const width = (full ? window.innerWidth : view.clientWidth) || 640;
+    const height = full ? (window.innerHeight || 480) : Math.round(width * 0.62);
+
     renderer.setSize(width, height, false);
     renderer.domElement.style.width = '100%';
-    renderer.domElement.style.height = 'auto';
+    renderer.domElement.style.height = full ? '100%' : 'auto';
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
   }
@@ -327,8 +385,17 @@ function mountMaze(ctx) {
     stepWalker(maze, walker, input, dt);
     if (!courseDone) seconds += dt;
 
-    camera.position.set(walker.x, 0.55, walker.y);
-    camera.rotation.set(0, -walker.yaw - Math.PI / 2, 0, 'YXZ');
+    // A little head bob while walking, and a torch that flickers.
+    const walking = (input.forward || input.back) && !walker.escaped;
+    bob = walking ? bob + dt * 9 : 0;
+    const eye = EYE_HEIGHT + (walking ? Math.sin(bob) * 0.035 : 0);
+
+    if (torch) torch.intensity = 2.1 + Math.sin(seconds * 11) * 0.14 + Math.sin(seconds * 4.3) * 0.1;
+    if (exitGlow) exitGlow.intensity = 1.8 + Math.sin(seconds * 3) * 0.7;
+    if (exitPillar) exitPillar.rotation.y += dt * 0.6;
+
+    camera.position.set(walker.x, eye, walker.y);
+    camera.rotation.set(pitch, -walker.yaw - Math.PI / 2, 0, 'YXZ');
     renderer.render(scene, camera);
     drawMinimap();
     scoreRow.set('time', clock(seconds));
@@ -367,6 +434,7 @@ function mountMaze(ctx) {
     const cells = course.levels[level];
     maze = buildMaze(cells, cells);
     walker = createWalker(maze);
+    pitch = 0;
 
     const route = solveMaze(maze);
     scoreRow.set('level', `${level + 1}/${course.levels.length}`);
@@ -458,6 +526,58 @@ function mountMaze(ctx) {
     if (dir) setInput(dir, false);
   }
 
+  /* Fullscreen + mouse look.
+
+     The two are deliberately tied together through the Pointer Lock API: going
+     fullscreen grabs the pointer so the mouse steers the camera, and leaving
+     fullscreen releases it, so the mouse goes back to being an ordinary
+     cursor. The browser drops pointer lock by itself on exit; the listener
+     below just keeps our own flag and the status line honest. */
+  const canFullscreen = typeof view.requestFullscreen === 'function';
+
+  function inFullscreen() {
+    return document.fullscreenElement === view;
+  }
+
+  function toggleFullscreen() {
+    if (!canFullscreen) return;
+    if (inFullscreen()) document.exitFullscreen();
+    else view.requestFullscreen().catch(() => {});
+  }
+
+  function onFullscreenChange() {
+    if (inFullscreen()) {
+      if (view.requestPointerLock) view.requestPointerLock();
+    } else if (document.exitPointerLock && document.pointerLockElement === view) {
+      document.exitPointerLock();
+    }
+    resize();
+  }
+
+  function onPointerLockChange() {
+    mouseLook = document.pointerLockElement === view;
+    if (courseDone) return;
+    ctx.setStatus(mouseLook
+      ? 'Mouse look on — Esc to leave fullscreen'
+      : `Maze ${level + 1} of ${course.levels.length} — find the way out`);
+  }
+
+  function onMouseMove(event) {
+    if (!mouseLook) return;                    // no pointer lock, no mouse look
+    walker.yaw += (event.movementX || 0) * MOUSE_SENSITIVITY;
+    pitch -= (event.movementY || 0) * MOUSE_SENSITIVITY;
+    pitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, pitch));
+  }
+
+  // Clicking the view while already fullscreen re-grabs the pointer, which is
+  // what players expect after pressing Esc once.
+  view.addEventListener('click', () => {
+    if (inFullscreen() && !mouseLook && view.requestPointerLock) view.requestPointerLock();
+  });
+
+  document.addEventListener('fullscreenchange', onFullscreenChange);
+  document.addEventListener('pointerlockchange', onPointerLockChange);
+  document.addEventListener('mousemove', onMouseMove);
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
 
@@ -488,6 +608,10 @@ function mountMaze(ctx) {
       stop();
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+      document.removeEventListener('pointerlockchange', onPointerLockChange);
+      document.removeEventListener('mousemove', onMouseMove);
+      if (scene) disposeScene();
       window.removeEventListener('resize', resize);
       if (renderer) renderer.dispose();
     },
