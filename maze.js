@@ -128,6 +128,8 @@ function solveMaze(maze, from = maze.start, to = maze.exit) {
    leaves at least one way out of the start square. */
 const HEADINGS = [[1, 0, 0], [0, 1, Math.PI / 2], [-1, 0, Math.PI], [0, -1, -Math.PI / 2]];
 
+const cellKey = (x, y) => `${Math.floor(x)},${Math.floor(y)}`;
+
 function createWalker(maze) {
   const open = HEADINGS.find(([dx, dy]) => !isWall(maze, maze.start.x + dx, maze.start.y + dy));
 
@@ -137,6 +139,9 @@ function createWalker(maze) {
     yaw: open ? open[2] : 0,
     escaped: false,
     steps: 0,
+    // Squares you have actually stood on. The minimap draws this and nothing
+    // else, so it can never give the route away.
+    trail: new Set([cellKey(maze.start.x, maze.start.y)]),
   };
 }
 
@@ -174,11 +179,56 @@ function stepWalker(maze, walker, input, dt) {
     walker.steps += Math.hypot(walker.x - before.x, walker.y - before.y);
   }
 
+  if (walker.trail) walker.trail.add(cellKey(walker.x, walker.y));
+
   if (Math.floor(walker.x) === maze.exit.x && Math.floor(walker.y) === maze.exit.y) {
     walker.escaped = true;
   }
 
   return walker;
+}
+
+/* The minimap: where the exit is, where you are, and where you have been.
+
+   Deliberately nothing else — no walls, no unexplored ground and above all no
+   route to the exit, so it helps you keep track without solving the maze for
+   you. */
+function drawMinimap(g, maze, walker, size) {
+  const cell = size / Math.max(maze.w, maze.h);
+
+  g.clearRect(0, 0, size, size);
+  g.fillStyle = 'rgba(6, 11, 25, 0.72)';
+  g.fillRect(0, 0, size, size);
+
+  // Where you have been.
+  g.fillStyle = 'rgba(148, 197, 255, 0.55)';
+  for (const key of walker.trail || []) {
+    const [x, y] = key.split(',').map(Number);
+    g.fillRect(x * cell, y * cell, Math.max(1, cell), Math.max(1, cell));
+  }
+
+  // The exit.
+  const marker = Math.max(3, cell * 1.6);
+  g.fillStyle = '#4ade80';
+  g.fillRect(
+    (maze.exit.x + 0.5) * cell - marker / 2,
+    (maze.exit.y + 0.5) * cell - marker / 2,
+    marker, marker);
+
+  // You, with a nose showing which way you face.
+  const px = walker.x * cell;
+  const py = walker.y * cell;
+  g.strokeStyle = '#fbbf24';
+  g.lineWidth = Math.max(1.5, cell * 0.5);
+  g.beginPath();
+  g.moveTo(px, py);
+  g.lineTo(px + Math.cos(walker.yaw) * cell * 2.4, py + Math.sin(walker.yaw) * cell * 2.4);
+  g.stroke();
+
+  g.fillStyle = '#fbbf24';
+  g.beginPath();
+  g.arc(px, py, Math.max(2.5, cell * 0.8), 0, Math.PI * 2);
+  g.fill();
 }
 
 /* ---------- fallback renderer ---------- */
@@ -202,17 +252,28 @@ function drawRaycast(g, maze, walker, pitch, width, height) {
   const planeX = -dirY * planeHalf;
   const planeY = dirX * planeHalf;
 
-  // Sky above the horizon, ground below it.
+  // A bright night sky above the horizon, dark tiled ground below it.
   const sky = g.createLinearGradient(0, 0, 0, Math.max(1, horizon));
-  sky.addColorStop(0, '#1e3a8a');
-  sky.addColorStop(0.7, '#60a5fa');
-  sky.addColorStop(1, '#bfdbfe');
+  sky.addColorStop(0, '#050b1f');
+  sky.addColorStop(0.55, '#132a63');
+  sky.addColorStop(1, '#3f6fb5');
   g.fillStyle = sky;
   g.fillRect(0, 0, width, Math.max(0, horizon));
 
+  // Stars, placed from a fixed sequence so they hold still as you turn.
+  let star = 987654321;
+  for (let i = 0; i < 150; i++) {
+    star = (star * 1664525 + 1013904223) >>> 0;
+    const sx = star % width;
+    const sy = (star >> 8) % Math.max(1, Math.floor(horizon));
+    if (sy > horizon - 4) continue;
+    g.fillStyle = `rgba(255, 255, 255, ${0.3 + ((star >> 20) % 60) / 100})`;
+    g.fillRect(sx, sy, (star >> 3) % 15 === 0 ? 2 : 1, 1);
+  }
+
   const ground = g.createLinearGradient(0, horizon, 0, height);
-  ground.addColorStop(0, '#20242b');
-  ground.addColorStop(1, '#41474f');
+  ground.addColorStop(0, '#161a20');
+  ground.addColorStop(1, '#3a4048');
   g.fillStyle = ground;
   g.fillRect(0, Math.max(0, horizon), width, height - Math.max(0, horizon));
 
@@ -253,22 +314,61 @@ function drawRaycast(g, maze, walker, pitch, width, height) {
     const top = horizon - ((WALL_HEIGHT - EYE_HEIGHT) / distance) * project;
     const bottom = horizon + (EYE_HEIGHT / distance) * project;
 
-    // Faces pointing along one axis are shaded darker, which is what makes
-    // corners legible; everything fades into the haze with distance.
-    const fade = Math.min(1, distance / 18);
-    const base = hitVertical ? 214 : 178;
-    const shade = Math.round(base * (1 - fade) + 150 * fade);
-    g.fillStyle = `rgb(${shade}, ${shade}, ${Math.min(255, shade + 4)})`;
-    g.fillRect(x, top, 1, Math.max(1, bottom - top));
+    /* Brickwork. Where along the wall face the ray landed decides which brick
+       this column belongs to, so the courses run in a proper staggered bond
+       rather than lining up. Faces along one axis are shaded darker, which is
+       what makes corners legible, and everything fades into the night. */
+    const fade = Math.min(1, distance / 16);
+    const side = hitVertical ? 1 : 0.82;
+    const tone = (light) => {
+      const base = light ? 236 : 196;
+      const v = Math.round(base * side * (1 - fade) + 58 * fade);
+      return `rgb(${v}, ${v}, ${Math.min(255, v + 6)})`;
+    };
 
-    // Brick courses, near columns only — far ones would alias into noise.
-    if (distance < 7) {
-      const courses = 6;
-      g.fillStyle = `rgba(90, 96, 104, ${0.5 * (1 - distance / 7)})`;
-      for (let c = 1; c < courses; c++) {
-        const worldY = (WALL_HEIGHT / courses) * c;
-        const y = horizon + ((EYE_HEIGHT - worldY) / distance) * project;
-        if (y > top && y < bottom) g.fillRect(x, y, 1, 1);
+    let wallX = hitVertical ? walker.y + distance * rayY : walker.x + distance * rayX;
+    wallX -= Math.floor(wallX);
+
+    const courses = 5;
+    const courseH = (bottom - top) / courses;
+
+    for (let c = 0; c < courses; c++) {
+      const yTop = top + c * courseH;
+      /* Two bricks across each cell face, every other course shifted by half
+         a brick. The shift has to be half a BRICK (0.5 here), not half a cell
+         — offset by a whole brick and the stagger cancels the course step,
+         leaving vertical stripes instead of a bond. */
+      const brick = Math.floor(wallX * 2 + (c % 2) * 0.5);
+      g.fillStyle = tone(((brick + c) % 2 + 2) % 2 === 0);
+      g.fillRect(x, yTop, 1, Math.max(1, courseH + 1));
+    }
+
+    if (distance < 9) {
+      const near = 1 - distance / 9;
+
+      // Mortar. Capped in pixels: a course close up is thousands of pixels
+      // tall, and a percentage of that paints fat grey bands across the wall.
+      const mortar = Math.min(3, Math.max(1, courseH * 0.06));
+      g.fillStyle = `rgba(88, 94, 102, ${0.7 * near})`;
+      for (let c = 1; c < courses; c++) g.fillRect(x, top + c * courseH, 1, mortar);
+
+      // Tiny white flecks, from a fixed hash so they sit still on the wall.
+      const grain = ((Math.floor(wallX * 64) * 73856093) ^ (mapX * 19349663) ^ (mapY * 83492791)) >>> 0;
+      if (grain % 5 === 0) {
+        g.fillStyle = `rgba(255, 255, 255, ${0.5 * near})`;
+        g.fillRect(x, top + ((grain >> 8) % Math.max(1, Math.floor(bottom - top))), 1, 1);
+      }
+    }
+
+    // Floor tiles: one line per grid step away, which reads as square tiles
+    // running off into the distance.
+    if (x % 2 === 0) {
+      for (let step = 1; step <= 12; step++) {
+        const y = horizon + (EYE_HEIGHT / step) * project;
+        if (y >= height || y <= horizon) continue;
+        if (y > bottom) continue;
+        g.fillStyle = `rgba(226, 232, 240, ${0.1 * (1 - step / 12)})`;
+        g.fillRect(x, y, 2, 1);
       }
     }
   }
@@ -357,78 +457,113 @@ function paintCanvas(size, draw) {
 function makeTextures() {
   if (textures) return textures;
 
-  // Light grey brick. Mortar sits close to the brick tone so the courses read
-  // as texture rather than as a loud grid.
+  // A deterministic speckle, so bricks and tiles have grain without needing a
+  // photograph. Same input always gives the same dots.
+  const speckle = (g, x, y, w, h, count, alpha) => {
+    g.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+    let n = ((x * 73856093) ^ (y * 19349663)) >>> 0;
+    for (let i = 0; i < count; i++) {
+      n = (n * 1664525 + 1013904223) >>> 0;
+      const px = x + (n % w);
+      const py = y + ((n >> 9) % h);
+      g.fillRect(px, py, 1, 1);
+    }
+  };
+
+  // Brick: rectangles alternating between off-white and light grey, flecked
+  // with tiny white dots.
   const brick = paintCanvas(256, (g, size) => {
     const rows = 6;
+    const cols = 4;
     const brickH = size / rows;
-    g.fillStyle = '#9ba1a8';                       // mortar
+    const brickW = size / cols;
+
+    g.fillStyle = '#8f959c';                       // mortar
     g.fillRect(0, 0, size, size);
 
     for (let row = 0; row < rows; row++) {
       const offset = (row % 2) * 0.5;
-      for (let i = -1; i < 5; i++) {
-        const x = (i + offset) * (size / 4);
-        const y = row * brickH;
-        const shade = 198 + ((row * 7 + i * 13) % 7) * 6;   // 198..234
-        g.fillStyle = `rgb(${shade}, ${shade}, ${shade + 3})`;
-        g.fillRect(x + 2, y + 2, size / 4 - 4, brickH - 4);
+      for (let i = -1; i < cols + 1; i++) {
+        const x = Math.round((i + offset) * brickW);
+        const y = Math.round(row * brickH);
+        const w = Math.round(brickW) - 3;
+        const h = Math.round(brickH) - 3;
 
-        g.fillStyle = 'rgba(255, 255, 255, 0.16)';          // top-edge catch
-        g.fillRect(x + 2, y + 2, size / 4 - 4, 2);
+        // Alternate the two tones in a running bond.
+        const offWhite = (row + i) % 2 === 0;
+        g.fillStyle = offWhite ? '#ecebe6' : '#c2c7cc';
+        g.fillRect(x + 2, y + 2, w, h);
+
+        speckle(g, x + 2, y + 2, Math.max(1, w), Math.max(1, h), 14, offWhite ? 0.85 : 0.6);
+
+        g.fillStyle = 'rgba(255, 255, 255, 0.35)';  // light catching the top
+        g.fillRect(x + 2, y + 2, w, 1);
       }
     }
   });
 
-  // Flat capstone for the tops of the walls, which you see now the ceiling is
-  // gone.
+  // Capstone for the wall tops, which are on show with no ceiling.
   const cap = paintCanvas(64, (g, size) => {
-    g.fillStyle = '#aeb4ba';
+    g.fillStyle = '#d5d7d4';
     g.fillRect(0, 0, size, size);
-    g.fillStyle = 'rgba(90, 98, 106, 0.35)';
-    for (let i = 0; i < 40; i++) {
-      const n = (i * 2654435761) % 4096;
-      g.fillRect((n % size), ((n >> 6) % size), 3, 2);
-    }
+    speckle(g, 0, 0, size, size, 90, 0.7);
+    g.fillStyle = 'rgba(110, 118, 126, 0.3)';
+    g.fillRect(0, 0, size, 2);
+    g.fillRect(0, size - 2, size, 2);
   });
 
-  // Dark grey floor tiles, one tile per grid square.
+  // Floor: dark grey square tiles, also flecked with white.
   const floor = paintCanvas(256, (g, size) => {
     const half = size / 2;
-    g.fillStyle = '#20242b';                       // grout
+    g.fillStyle = '#15181d';                       // grout
     g.fillRect(0, 0, size, size);
+
     for (let ty = 0; ty < 2; ty++) {
       for (let tx = 0; tx < 2; tx++) {
-        const shade = 52 + ((tx + ty * 2) % 3) * 5;
-        g.fillStyle = `rgb(${shade}, ${shade + 2}, ${shade + 6})`;
-        g.fillRect(tx * half + 3, ty * half + 3, half - 6, half - 6);
-        g.fillStyle = 'rgba(148, 163, 184, 0.07)';
-        g.fillRect(tx * half + 3, ty * half + 3, half - 6, 3);
+        const x = tx * half + 3;
+        const y = ty * half + 3;
+        const w = half - 6;
+        const shade = 58 + ((tx + ty) % 2) * 6;
+        g.fillStyle = `rgb(${shade}, ${shade + 2}, ${shade + 5})`;
+        g.fillRect(x, y, w, w);
+        speckle(g, x, y, w, w, 34, 0.55);
       }
     }
   });
 
-  // Sky: a vertical gradient with a few soft clouds, wrapped on the inside of
-  // a big sphere.
+  /* A bright night: deep blue overhead easing to a lit horizon, thick with
+     stars, with the moon low enough to see from inside the maze. */
   const sky = paintCanvas(512, (g, size) => {
     const grad = g.createLinearGradient(0, 0, 0, size);
-    grad.addColorStop(0, '#1e3a8a');
-    grad.addColorStop(0.45, '#60a5fa');
-    grad.addColorStop(0.72, '#bae6fd');
-    grad.addColorStop(1, '#dbeafe');
+    grad.addColorStop(0, '#050b1f');
+    grad.addColorStop(0.4, '#132a63');
+    grad.addColorStop(0.72, '#2f5fa8');
+    grad.addColorStop(1, '#7fa9d8');
     g.fillStyle = grad;
     g.fillRect(0, 0, size, size);
 
-    g.fillStyle = 'rgba(255, 255, 255, 0.5)';
-    for (let i = 0; i < 26; i++) {
-      const n = (i * 2654435761) >>> 0;
+    let n = 987654321;
+    for (let i = 0; i < 520; i++) {
+      n = (n * 1664525 + 1013904223) >>> 0;
       const x = n % size;
-      const y = size * 0.32 + ((n >> 8) % Math.floor(size * 0.3));
-      const r = 16 + ((n >> 16) % 34);
-      g.beginPath();
-      g.ellipse(x, y, r, r * 0.42, 0, 0, Math.PI * 2);
-      g.fill();
+      const y = (n >> 7) % Math.floor(size * 0.78);
+      const bright = 0.35 + ((n >> 20) % 65) / 100;
+      const big = (n >> 3) % 17 === 0;
+      g.fillStyle = `rgba(255, 255, 255, ${bright})`;
+      g.fillRect(x, y, big ? 2 : 1, big ? 2 : 1);
     }
+
+    const moonX = size * 0.68;
+    const moonY = size * 0.3;
+    const glow = g.createRadialGradient(moonX, moonY, 4, moonX, moonY, 90);
+    glow.addColorStop(0, 'rgba(226, 236, 255, 0.55)');
+    glow.addColorStop(1, 'rgba(226, 236, 255, 0)');
+    g.fillStyle = glow;
+    g.fillRect(moonX - 95, moonY - 95, 190, 190);
+    g.fillStyle = '#eef3ff';
+    g.beginPath();
+    g.ellipse(moonX, moonY, 22, 22, 0, 0, Math.PI * 2);
+    g.fill();
   });
   sky.wrapS = THREE.ClampToEdgeWrapping;
   sky.wrapT = THREE.ClampToEdgeWrapping;
@@ -516,6 +651,15 @@ function mountMaze(ctx) {
 
   const pad = dpad((dir) => setInput(dir, true), { onRelease: (dir) => setInput(dir, false) });
 
+  // Overlaid on the view in both renderers, at a fixed size so it stays
+  // legible windowed and does not balloon in fullscreen.
+  const MINIMAP_PX = 220;
+  const minimap = document.createElement('canvas');
+  minimap.className = 'minimap';
+  minimap.width = MINIMAP_PX;
+  minimap.height = MINIMAP_PX;
+  const map2d = minimap.getContext('2d');
+
   // Shown in place of the 3D view when it cannot start.
   function fallbackNote(reason) {
     const note = document.createElement('p');
@@ -549,9 +693,9 @@ function mountMaze(ctx) {
     const skin = makeTextures();
 
     scene = new THREE.Scene();
-    // Fog is tinted to the sky's horizon so distant walls fade into it rather
-    // than into a dark band that would give the open top away.
-    scene.fog = new THREE.Fog(0xa9cdf2, 8, 46);
+    // Fog is tinted to the night horizon so distant walls fade into the sky
+    // rather than into a band that would give the open top away.
+    scene.fog = new THREE.Fog(0x2b4a7d, 9, 52);
 
     camera = new THREE.PerspectiveCamera(MAZE_FOV, 16 / 10, 0.05, 220);
 
@@ -627,16 +771,16 @@ function mountMaze(ctx) {
     exitGlow.position.set(maze.exit.x + 0.5, 1.2, maze.exit.y + 0.5);
     scene.add(exitGlow);
 
-    // Daylight now that the maze is open: sky above, bounced light from the
-    // floor, and a sun raking across so the wall faces read differently.
-    scene.add(new THREE.HemisphereLight(0xcfe4ff, 0x3b4048, 1.05));
+    // Moonlight: cool and bright enough to read the walls by, with the
+    // brickwork picking up the blue of the sky.
+    scene.add(new THREE.HemisphereLight(0x9fc0f0, 0x2a3038, 0.95));
 
-    const sun = new THREE.DirectionalLight(0xfff6e0, 0.85);
-    sun.position.set(maze.w * 0.35, 30, -maze.h * 0.2);
-    scene.add(sun);
+    const moon = new THREE.DirectionalLight(0xdce8ff, 0.75);
+    moon.position.set(maze.w * 0.35, 34, -maze.h * 0.25);
+    scene.add(moon);
 
-    // A soft lamp on the camera keeps nearby walls from going flat.
-    torch = new THREE.PointLight(0xffe9c4, 0.75, 8, 1.8);
+    // A warm lamp on the camera keeps nearby walls from going flat.
+    torch = new THREE.PointLight(0xffe0b0, 0.85, 9, 1.8);
     camera.add(torch);
     scene.add(camera);
   }
@@ -696,7 +840,7 @@ function mountMaze(ctx) {
     flatCanvas = document.createElement('canvas');
     flatCanvas.className = 'viewport__canvas';
     flat = flatCanvas.getContext('2d');
-    view.replaceChildren(flatCanvas);
+    view.replaceChildren(flatCanvas, minimap);
     resize();
     ctx.setHint('W / ↑ walk · A D or ← → turn · ⛶ fullscreen for mouse look');
     ctx.setStatus(`${reason} Playing in 2D instead.`);
@@ -732,6 +876,7 @@ function mountMaze(ctx) {
       renderer.render(scene, camera);
     }
 
+    drawMinimap(map2d, maze, walker, MINIMAP_PX);
     scoreRow.set('time', clock(seconds));
 
     if (walker.escaped && !before) escape();
@@ -802,7 +947,7 @@ function mountMaze(ctx) {
     loadLevel();
 
     if (!renderer && !flat) return;     // still loading
-    if (renderer) view.replaceChildren(renderer.domElement);
+    if (renderer) view.replaceChildren(renderer.domElement, minimap);
     resize();
     ctx.setStatus(`Maze 1 of ${course.levels.length} — find the way out`);
     start();
@@ -932,6 +1077,6 @@ if (typeof module !== 'undefined') {
   module.exports = {
     buildMaze, solveMaze, isWall, createWalker, stepWalker, moveWalker,
     MAZE_COURSES, courseById, WALKER_RADIUS, WALK_SPEED, TURN_SPEED,
-    drawRaycast, MAZE_FOV, WALL_HEIGHT, EYE_HEIGHT,
+    drawRaycast, drawMinimap, cellKey, MAZE_FOV, WALL_HEIGHT, EYE_HEIGHT,
   };
 }

@@ -77,8 +77,12 @@ from 10x10 up to 38x38.
 
 Brick walls, tiled floors and the sky are painted onto 2D canvases at load
 time and used as textures, so there are still no image files to download. The
-maze is open to the sky rather than roofed, lit by a hemisphere light and a
-raking sun.
+maze is open to a star-lit night sky rather than roofed, lit by moonlight.
+
+The minimap shows three things and nothing else: where you are, where you have
+been, and where the exit is. It never draws walls you have not walked past and
+never draws the route, so it helps you keep your bearings without solving the
+maze for you.
 
 Maze generation is a recursive backtracker, which produces a *perfect* maze:
 every square reachable, exactly one route between any two points, no loops.
