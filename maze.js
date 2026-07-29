@@ -27,8 +27,10 @@ const WALK_SPEED = 3.1;        // cells per second
 const TURN_SPEED = 2.4;        // radians per second
 const MOUSE_SENSITIVITY = 0.0026;
 const MAX_PITCH = 0.9;         // radians you can look up or down
-const WALL_HEIGHT = 2.4;
-const EYE_HEIGHT = 0.95;
+// Corridors are one unit wide, so tall walls turn them into slot canyons with
+// no sky in view. Keep the walls just above eye level.
+const WALL_HEIGHT = 1.5;
+const EYE_HEIGHT = 0.62;
 // Not FIELD_OF_VIEW: racing.js already declares that at global scope.
 const MAZE_FOV = 95;           // degrees; wide enough to feel first-person
 
@@ -118,11 +120,21 @@ function solveMaze(maze, from = maze.start, to = maze.exit) {
 
 /* ---------- the walker ---------- */
 
+/* Start in the middle of the start square, facing down an open corridor.
+
+   Facing a fixed direction spawned you nose-to-wall about half the time, and a
+   wall half a unit away fills the entire view with flat grey — which reads as
+   a renderer that has failed rather than as a maze. A perfect maze always
+   leaves at least one way out of the start square. */
+const HEADINGS = [[1, 0, 0], [0, 1, Math.PI / 2], [-1, 0, Math.PI], [0, -1, -Math.PI / 2]];
+
 function createWalker(maze) {
+  const open = HEADINGS.find(([dx, dy]) => !isWall(maze, maze.start.x + dx, maze.start.y + dy));
+
   return {
-    x: maze.start.x + 0.5,     // stand in the middle of the start square
+    x: maze.start.x + 0.5,
     y: maze.start.y + 0.5,
-    yaw: 0,                    // 0 looks along +x
+    yaw: open ? open[2] : 0,
     escaped: false,
     steps: 0,
   };
@@ -167,6 +179,123 @@ function stepWalker(maze, walker, input, dt) {
   }
 
   return walker;
+}
+
+/* ---------- fallback renderer ---------- */
+
+/* A first-person view drawn with plain 2D canvas, by raycasting: for every
+   screen column, march a ray through the grid until it meets a wall and draw
+   a slice as tall as that wall is near. No WebGL, no library — so the maze is
+   playable on machines where three.js cannot get a context, which is common
+   on remote desktops and anywhere hardware acceleration is switched off.
+
+   Pure apart from the context it draws into, so it can be rendered and looked
+   at outside a browser. */
+function drawRaycast(g, maze, walker, pitch, width, height) {
+  const fov = (MAZE_FOV * Math.PI) / 180;
+  const planeHalf = Math.tan(fov / 2);
+  const project = width / 2 / planeHalf;         // world units to pixels at 1 away
+  const horizon = height * 0.5 + pitch * height * 0.55;
+
+  const dirX = Math.cos(walker.yaw);
+  const dirY = Math.sin(walker.yaw);
+  const planeX = -dirY * planeHalf;
+  const planeY = dirX * planeHalf;
+
+  // Sky above the horizon, ground below it.
+  const sky = g.createLinearGradient(0, 0, 0, Math.max(1, horizon));
+  sky.addColorStop(0, '#1e3a8a');
+  sky.addColorStop(0.7, '#60a5fa');
+  sky.addColorStop(1, '#bfdbfe');
+  g.fillStyle = sky;
+  g.fillRect(0, 0, width, Math.max(0, horizon));
+
+  const ground = g.createLinearGradient(0, horizon, 0, height);
+  ground.addColorStop(0, '#20242b');
+  ground.addColorStop(1, '#41474f');
+  g.fillStyle = ground;
+  g.fillRect(0, Math.max(0, horizon), width, height - Math.max(0, horizon));
+
+  const depth = new Float64Array(width);
+
+  for (let x = 0; x < width; x++) {
+    const cameraX = (2 * x) / width - 1;
+    const rayX = dirX + planeX * cameraX;
+    const rayY = dirY + planeY * cameraX;
+
+    let mapX = Math.floor(walker.x);
+    let mapY = Math.floor(walker.y);
+    const deltaX = rayX === 0 ? Infinity : Math.abs(1 / rayX);
+    const deltaY = rayY === 0 ? Infinity : Math.abs(1 / rayY);
+
+    let stepX;
+    let sideX;
+    if (rayX < 0) { stepX = -1; sideX = (walker.x - mapX) * deltaX; }
+    else { stepX = 1; sideX = (mapX + 1 - walker.x) * deltaX; }
+
+    let stepY;
+    let sideY;
+    if (rayY < 0) { stepY = -1; sideY = (walker.y - mapY) * deltaY; }
+    else { stepY = 1; sideY = (mapY + 1 - walker.y) * deltaY; }
+
+    // Digital differential analysis: hop grid line to grid line.
+    let hitVertical = false;
+    let guard = 0;
+    while (guard++ < 512) {
+      if (sideX < sideY) { sideX += deltaX; mapX += stepX; hitVertical = true; }
+      else { sideY += deltaY; mapY += stepY; hitVertical = false; }
+      if (isWall(maze, mapX, mapY)) break;
+    }
+
+    const distance = Math.max(0.0001, hitVertical ? sideX - deltaX : sideY - deltaY);
+    depth[x] = distance;
+
+    const top = horizon - ((WALL_HEIGHT - EYE_HEIGHT) / distance) * project;
+    const bottom = horizon + (EYE_HEIGHT / distance) * project;
+
+    // Faces pointing along one axis are shaded darker, which is what makes
+    // corners legible; everything fades into the haze with distance.
+    const fade = Math.min(1, distance / 18);
+    const base = hitVertical ? 214 : 178;
+    const shade = Math.round(base * (1 - fade) + 150 * fade);
+    g.fillStyle = `rgb(${shade}, ${shade}, ${Math.min(255, shade + 4)})`;
+    g.fillRect(x, top, 1, Math.max(1, bottom - top));
+
+    // Brick courses, near columns only — far ones would alias into noise.
+    if (distance < 7) {
+      const courses = 6;
+      g.fillStyle = `rgba(90, 96, 104, ${0.5 * (1 - distance / 7)})`;
+      for (let c = 1; c < courses; c++) {
+        const worldY = (WALL_HEIGHT / courses) * c;
+        const y = horizon + ((EYE_HEIGHT - worldY) / distance) * project;
+        if (y > top && y < bottom) g.fillRect(x, y, 1, 1);
+      }
+    }
+  }
+
+  // The exit, billboarded and depth-tested against the wall slices.
+  const relX = maze.exit.x + 0.5 - walker.x;
+  const relY = maze.exit.y + 0.5 - walker.y;
+  const det = planeX * dirY - dirX * planeY;
+  if (det !== 0) {
+    const invDet = 1 / det;
+    const camX = invDet * (dirY * relX - dirX * relY);
+    const camY = invDet * (-planeY * relX + planeX * relY);
+
+    if (camY > 0.15) {
+      const screenX = (width / 2) * (1 + camX / camY);
+      const size = (project / camY) * 0.85;
+      const bottom = horizon + (EYE_HEIGHT / camY) * project;
+
+      for (let x = Math.floor(screenX - size / 2); x < screenX + size / 2; x++) {
+        if (x < 0 || x >= width) continue;
+        if (depth[x] <= camY) continue;                 // hidden behind a wall
+        const edge = 1 - Math.abs((x - screenX) / (size / 2));
+        g.fillStyle = `rgba(74, 222, 128, ${0.35 + edge * 0.5})`;
+        g.fillRect(x, bottom - size * 1.5, 1, size * 1.5);
+      }
+    }
+  }
 }
 
 /* ---------- the game module ---------- */
@@ -354,6 +483,8 @@ function mountMaze(ctx) {
   let exitGlow = null;
   let pitch = 0;          // mouse look up/down, radians
   let mouseLook = false;  // only true while the pointer is locked
+  let flatCanvas = null;  // the 2D fallback view, when WebGL is unavailable
+  let flat = null;
   let frame = null;
   let lastTime = 0;
   let seconds = 0;
@@ -531,20 +662,46 @@ function mountMaze(ctx) {
     window.addEventListener('resize', resize);
   }
 
-  function resize() {
-    if (!renderer || !camera) return;
-
-    // Windowed the view keeps a fixed 0.62 letterbox; fullscreen it takes the
-    // screen's own shape, or the picture would come out stretched.
+  // Windowed the view keeps a fixed 0.62 letterbox; fullscreen it takes the
+  // screen's own shape, or the picture would come out stretched.
+  function viewportSize() {
     const full = inFullscreen();
     const width = (full ? window.innerWidth : view.clientWidth) || 640;
     const height = full ? (window.innerHeight || 480) : Math.round(width * 0.62);
+    return { full, width, height };
+  }
 
+  function resize() {
+    const { full, width, height } = viewportSize();
+
+    if (flatCanvas) {
+      flatCanvas.width = width;
+      flatCanvas.height = height;
+      flatCanvas.style.width = '100%';
+      flatCanvas.style.height = full ? '100%' : 'auto';
+      return;
+    }
+
+    if (!renderer || !camera) return;
     renderer.setSize(width, height, false);
     renderer.domElement.style.width = '100%';
     renderer.domElement.style.height = full ? '100%' : 'auto';
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+  }
+
+  /* The no-WebGL path: same game, drawn by raycasting onto a 2D canvas. */
+  function startFallback(reason) {
+    if (flatCanvas) return;
+    flatCanvas = document.createElement('canvas');
+    flatCanvas.className = 'viewport__canvas';
+    flat = flatCanvas.getContext('2d');
+    view.replaceChildren(flatCanvas);
+    resize();
+    ctx.setHint('W / ↑ walk · A D or ← → turn · ⛶ fullscreen for mouse look');
+    ctx.setStatus(`${reason} Playing in 2D instead.`);
+    loadLevel();
+    start();
   }
 
   /* ---------- loop ---------- */
@@ -567,9 +724,14 @@ function mountMaze(ctx) {
     if (exitGlow) exitGlow.intensity = 1.8 + Math.sin(seconds * 3) * 0.7;
     if (exitPillar) exitPillar.rotation.y += dt * 0.6;
 
-    camera.position.set(walker.x, eye, walker.y);
-    camera.rotation.set(pitch, -walker.yaw - Math.PI / 2, 0, 'YXZ');
-    renderer.render(scene, camera);
+    if (flat) {
+      drawRaycast(flat, maze, { ...walker, y: walker.y }, pitch, flatCanvas.width, flatCanvas.height);
+    } else {
+      camera.position.set(walker.x, eye, walker.y);
+      camera.rotation.set(pitch, -walker.yaw - Math.PI / 2, 0, 'YXZ');
+      renderer.render(scene, camera);
+    }
+
     scoreRow.set('time', clock(seconds));
 
     if (walker.escaped && !before) escape();
@@ -612,7 +774,7 @@ function mountMaze(ctx) {
     scoreRow.set('level', `${level + 1}/${course.levels.length}`);
     scoreRow.set('left', route ? `${route.length} steps` : '—');
 
-    if (renderer) buildScene();
+    if (renderer && !flat) buildScene();
   }
 
   function start() {
@@ -639,8 +801,8 @@ function mountMaze(ctx) {
     scoreRow.set('best', storage.get(bestKey()) ? clock(storage.get(bestKey())) : '—');
     loadLevel();
 
-    if (!renderer) return;              // still loading, or unsupported
-    view.replaceChildren(renderer.domElement);
+    if (!renderer && !flat) return;     // still loading
+    if (renderer) view.replaceChildren(renderer.domElement);
     resize();
     ctx.setStatus(`Maze 1 of ${course.levels.length} — find the way out`);
     start();
@@ -717,22 +879,17 @@ function mountMaze(ctx) {
 
   restart();   // sets up the maze and the stats even if 3D never arrives
 
-  // Anything that goes wrong here has to end in a message. Left unhandled, a
-  // failure would sit on "Loading the 3D engine…" indefinitely.
-  function giveUp(reason) {
-    ctx.setStatus(reason);
-    if (!view.querySelector('.viewport__note')) view.append(fallbackNote(reason));
-  }
-
+  /* Whatever goes wrong with WebGL, the maze still has to be playable, so
+     every failure falls back to the raycaster rather than to an apology. */
   if (!webglAvailable()) {
-    giveUp('This browser has no WebGL, so the 3D view cannot run.');
+    startFallback('No WebGL here.');
   } else {
     ctx.setStatus('Loading the 3D engine…');
     loadThree()
       .then((reason) => {
         if (destroyed) return;
         if (reason) {
-          giveUp(reason);
+          startFallback(reason);
           return;
         }
         startRenderer();     // may still throw: a probe passing does not
@@ -740,7 +897,8 @@ function mountMaze(ctx) {
       })
       .catch((error) => {
         if (destroyed) return;
-        giveUp(`The 3D view could not start: ${error && error.message ? error.message : error}`);
+        renderer = null;
+        startFallback(`3D unavailable (${error && error.message ? error.message : error}).`);
       });
   }
 
@@ -774,5 +932,6 @@ if (typeof module !== 'undefined') {
   module.exports = {
     buildMaze, solveMaze, isWall, createWalker, stepWalker, moveWalker,
     MAZE_COURSES, courseById, WALKER_RADIUS, WALK_SPEED, TURN_SPEED,
+    drawRaycast, MAZE_FOV, WALL_HEIGHT, EYE_HEIGHT,
   };
 }

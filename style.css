@@ -586,3 +586,9 @@ html:fullscreen {
   background: var(--bg);
   overflow-y: auto;
 }
+
+.viewport__canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+}
