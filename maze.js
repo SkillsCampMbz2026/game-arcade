@@ -27,6 +27,7 @@ const courseById = (id) => MAZE_COURSES.find((c) => c.id === id) || MAZE_COURSES
 
 const WALKER_RADIUS = 0.26;    // in cells; keeps you off the wall faces
 const WALK_SPEED = 3.1;        // cells per second
+const SPRINT_MULTIPLIER = 1.9; // while space is held
 const TURN_SPEED = 2.4;        // radians per second
 const MOUSE_SENSITIVITY = 0.0026;
 const MAX_PITCH = 0.9;         // radians you can look up or down
@@ -174,11 +175,24 @@ function stepWalker(maze, walker, input, dt) {
   const turn = (input.right ? 1 : 0) - (input.left ? 1 : 0);
   walker.yaw += turn * TURN_SPEED * dt;
 
+  const speed = WALK_SPEED * (input.sprint ? SPRINT_MULTIPLIER : 1);
+  const before = { x: walker.x, y: walker.y };
+
   const drive = (input.forward ? 1 : 0) - (input.back ? 1 : 0);
   if (drive) {
-    const distance = drive * WALK_SPEED * dt;
-    const before = { x: walker.x, y: walker.y };
+    const distance = drive * speed * dt;
     moveWalker(maze, walker, Math.cos(walker.yaw) * distance, Math.sin(walker.yaw) * distance);
+  }
+
+  // Strafing: sideways without turning. The player's right is 90 degrees on
+  // from the heading, which is (-sin yaw, cos yaw).
+  const slide = (input.strafeRight ? 1 : 0) - (input.strafeLeft ? 1 : 0);
+  if (slide) {
+    const distance = slide * speed * dt;
+    moveWalker(maze, walker, -Math.sin(walker.yaw) * distance, Math.cos(walker.yaw) * distance);
+  }
+
+  if (drive || slide) {
     walker.steps += Math.hypot(walker.x - before.x, walker.y - before.y);
   }
 
@@ -255,23 +269,23 @@ function drawRaycast(g, maze, walker, pitch, width, height) {
   const planeX = -dirY * planeHalf;
   const planeY = dirX * planeHalf;
 
-  // A bright night sky above the horizon, dark tiled ground below it.
+  // Dusk above the horizon, dark tiled ground below it.
   const sky = g.createLinearGradient(0, 0, 0, Math.max(1, horizon));
-  sky.addColorStop(0, '#050b1f');
-  sky.addColorStop(0.55, '#132a63');
-  sky.addColorStop(1, '#3f6fb5');
+  sky.addColorStop(0, '#2f568f');
+  sky.addColorStop(0.42, '#78a3d6');
+  sky.addColorStop(0.78, '#cfdcE6');
+  sky.addColorStop(1, '#f3bb84');
   g.fillStyle = sky;
   g.fillRect(0, 0, width, Math.max(0, horizon));
 
-  // Stars, placed from a fixed sequence so they hold still as you turn.
+  // Only the first few stars, high up where the sky is still dark.
   let star = 987654321;
-  for (let i = 0; i < 150; i++) {
+  for (let i = 0; i < 40; i++) {
     star = (star * 1664525 + 1013904223) >>> 0;
     const sx = star % width;
-    const sy = (star >> 8) % Math.max(1, Math.floor(horizon));
-    if (sy > horizon - 4) continue;
-    g.fillStyle = `rgba(255, 255, 255, ${0.3 + ((star >> 20) % 60) / 100})`;
-    g.fillRect(sx, sy, (star >> 3) % 15 === 0 ? 2 : 1, 1);
+    const sy = (star >> 8) % Math.max(1, Math.floor(horizon * 0.4));
+    g.fillStyle = `rgba(255, 255, 255, ${0.2 + ((star >> 20) % 40) / 100})`;
+    g.fillRect(sx, sy, 1, 1);
   }
 
   const ground = g.createLinearGradient(0, horizon, 0, height);
@@ -321,12 +335,17 @@ function drawRaycast(g, maze, walker, pitch, width, height) {
        this column belongs to, so the courses run in a proper staggered bond
        rather than lining up. Faces along one axis are shaded darker, which is
        what makes corners legible, and everything fades into the night. */
-    const fade = Math.min(1, distance / 16);
-    const side = hitVertical ? 1 : 0.82;
+    /* Matte, not glowing: the tones top out well below white and fade toward
+       the dusk haze rather than toward black, so nothing looks lit from
+       within. The two axes are shaded differently, which is what makes a
+       corner read as a corner. */
+    const fade = Math.min(1, distance / 22);
+    const side = hitVertical ? 1 : 0.78;
     const tone = (light) => {
-      const base = light ? 236 : 196;
-      const v = Math.round(base * side * (1 - fade) + 58 * fade);
-      return `rgb(${v}, ${v}, ${Math.min(255, v + 6)})`;
+      const base = light ? 214 : 178;
+      const v = Math.round(base * side * (1 - fade) + 150 * fade);
+      const b = Math.round(v * 0.98 + 12 * fade);
+      return `rgb(${v}, ${v}, ${Math.min(255, b + 4)})`;
     };
 
     let wallX = hitVertical ? walker.y + distance * rayY : walker.x + distance * rayX;
@@ -361,6 +380,26 @@ function drawRaycast(g, maze, walker, pitch, width, height) {
         g.fillStyle = `rgba(255, 255, 255, ${0.5 * near})`;
         g.fillRect(x, top + ((grain >> 8) % Math.max(1, Math.floor(bottom - top))), 1, 1);
       }
+    }
+
+    /* Contact shading. Darkening the very top and bottom of each slice reads
+       as the wall meeting the floor and the sky, and darkening the edge of a
+       face where it meets the next one picks out the corners — both are cheap
+       stand-ins for ambient occlusion and do a lot for the sense of depth. */
+    const slice = bottom - top;
+    if (slice > 6) {
+      const contact = Math.min(14, slice * 0.06);
+      g.fillStyle = 'rgba(30, 36, 46, 0.32)';
+      g.fillRect(x, bottom - contact, 1, contact);
+      g.fillStyle = 'rgba(30, 36, 46, 0.16)';
+      g.fillRect(x, top, 1, Math.max(1, contact * 0.5));
+    }
+
+    // Near the edge of a wall face, deepen the shade so corners stand out.
+    const edge = Math.min(wallX, 1 - wallX);
+    if (edge < 0.04) {
+      g.fillStyle = `rgba(28, 34, 44, ${0.16 * (1 - edge / 0.04)})`;
+      g.fillRect(x, top, 1, Math.max(1, slice));
     }
 
     // Floor tiles: one line per grid step away, which reads as square tiles
@@ -534,39 +573,38 @@ function makeTextures() {
     }
   });
 
-  /* A bright night: deep blue overhead easing to a lit horizon, thick with
-     stars, with the moon low enough to see from inside the maze. */
+  /* Dusk: the light is still up, but night is coming. Deep blue overhead
+     warming through to a golden horizon, with only the first few stars high
+     up rather than a full night sky. */
   const sky = paintCanvas(512, (g, size) => {
     const grad = g.createLinearGradient(0, 0, 0, size);
-    grad.addColorStop(0, '#050b1f');
-    grad.addColorStop(0.4, '#132a63');
-    grad.addColorStop(0.72, '#2f5fa8');
-    grad.addColorStop(1, '#7fa9d8');
+    grad.addColorStop(0, '#2f568f');
+    grad.addColorStop(0.34, '#6d9ad0');
+    grad.addColorStop(0.62, '#b9cfe2');
+    grad.addColorStop(0.82, '#f0c48a');
+    grad.addColorStop(1, '#f6a86a');
     g.fillStyle = grad;
     g.fillRect(0, 0, size, size);
 
+    // Early stars only, and only in the darker upper band.
     let n = 987654321;
-    for (let i = 0; i < 520; i++) {
+    for (let i = 0; i < 90; i++) {
       n = (n * 1664525 + 1013904223) >>> 0;
       const x = n % size;
-      const y = (n >> 7) % Math.floor(size * 0.78);
-      const bright = 0.35 + ((n >> 20) % 65) / 100;
-      const big = (n >> 3) % 17 === 0;
+      const y = (n >> 7) % Math.floor(size * 0.3);
+      const bright = 0.2 + ((n >> 20) % 45) / 100;
       g.fillStyle = `rgba(255, 255, 255, ${bright})`;
-      g.fillRect(x, y, big ? 2 : 1, big ? 2 : 1);
+      g.fillRect(x, y, 1, 1);
     }
 
-    const moonX = size * 0.68;
-    const moonY = size * 0.3;
-    const glow = g.createRadialGradient(moonX, moonY, 4, moonX, moonY, 90);
-    glow.addColorStop(0, 'rgba(226, 236, 255, 0.55)');
-    glow.addColorStop(1, 'rgba(226, 236, 255, 0)');
+    // The sun just going down, low enough to sit near the horizon.
+    const sunX = size * 0.7;
+    const sunY = size * 0.8;
+    const glow = g.createRadialGradient(sunX, sunY, 6, sunX, sunY, 130);
+    glow.addColorStop(0, 'rgba(255, 226, 170, 0.65)');
+    glow.addColorStop(1, 'rgba(255, 226, 170, 0)');
     g.fillStyle = glow;
-    g.fillRect(moonX - 95, moonY - 95, 190, 190);
-    g.fillStyle = '#eef3ff';
-    g.beginPath();
-    g.ellipse(moonX, moonY, 22, 22, 0, 0, Math.PI * 2);
-    g.fill();
+    g.fillRect(sunX - 135, sunY - 135, 270, 270);
   });
   sky.wrapS = THREE.ClampToEdgeWrapping;
   sky.wrapT = THREE.ClampToEdgeWrapping;
@@ -629,7 +667,10 @@ function mountMaze(ctx) {
   let running = false;
   let bob = 0;
   let destroyed = false;
-  const input = { forward: false, back: false, left: false, right: false };
+  const input = {
+    forward: false, back: false, left: false, right: false,
+    strafeLeft: false, strafeRight: false, sprint: false,
+  };
 
   const bestKey = () => `maze-best-${course.id}`;
   const sizeLabel = () => `${course.levels[level]}x${course.levels[level]}`;
@@ -681,13 +722,16 @@ function mountMaze(ctx) {
   // page, so going fullscreen also grabs the pointer for mouse look.
   ctx.setFullscreenTarget(view);
   ctx.setTheme('maze');
-  ctx.setHint('W / ↑ walk · A D or ← → turn · ⛶ fullscreen for mouse look');
+  ctx.setHint('W S walk · A D strafe · ← → turn · space sprint · ⛶ mouse look');
 
   function setInput(dir, down) {
     if (dir === 'up') input.forward = down;
     else if (dir === 'down') input.back = down;
     else if (dir === 'left') input.left = down;
     else if (dir === 'right') input.right = down;
+    else if (dir === 'strafeLeft') input.strafeLeft = down;
+    else if (dir === 'strafeRight') input.strafeRight = down;
+    else if (dir === 'sprint') input.sprint = down;
   }
 
   /* ---------- three.js scene ---------- */
@@ -698,9 +742,9 @@ function mountMaze(ctx) {
     const skin = makeTextures();
 
     scene = new THREE.Scene();
-    // Fog is tinted to the night horizon so distant walls fade into the sky
-    // rather than into a band that would give the open top away.
-    scene.fog = new THREE.Fog(0x2b4a7d, 9, 52);
+    // Fog tinted to the dusk horizon, and pushed well back: seeing a long way
+    // down a corridor is most of what sells the depth.
+    scene.fog = new THREE.Fog(0xc9b79c, 14, 80);
 
     camera = new THREE.PerspectiveCamera(MAZE_FOV, 16 / 10, 0.05, 220);
 
@@ -776,17 +820,23 @@ function mountMaze(ctx) {
     exitGlow.position.set(maze.exit.x + 0.5, 1.2, maze.exit.y + 0.5);
     scene.add(exitGlow);
 
-    // Moonlight: cool and bright enough to read the walls by, with the
-    // brickwork picking up the blue of the sky.
-    scene.add(new THREE.HemisphereLight(0x9fc0f0, 0x2a3038, 0.95));
+    /* Evening daylight. There is deliberately no lamp on the camera: a point
+       light travelling with you paints a bright halo on whatever is nearest,
+       which is the "glow" that makes it look dated. Flat, even light from the
+       sky and a low sun keeps the surfaces matte. */
+    scene.add(new THREE.HemisphereLight(0xcfe0f5, 0x4a4238, 1.15));
 
-    const moon = new THREE.DirectionalLight(0xdce8ff, 0.75);
-    moon.position.set(maze.w * 0.35, 34, -maze.h * 0.25);
-    scene.add(moon);
+    const sun = new THREE.DirectionalLight(0xffd9a8, 0.8);
+    sun.position.set(maze.w * 0.8, 22, -maze.h * 0.35);
+    scene.add(sun);
 
-    // A warm lamp on the camera keeps nearby walls from going flat.
-    torch = new THREE.PointLight(0xffe0b0, 0.85, 9, 1.8);
-    camera.add(torch);
+    // A second, cooler light from the opposite side so the shaded faces are
+    // readable instead of black.
+    const fill = new THREE.DirectionalLight(0x9fbfe8, 0.35);
+    fill.position.set(-maze.w * 0.4, 16, maze.h * 0.7);
+    scene.add(fill);
+
+    torch = null;
     scene.add(camera);
   }
 
@@ -847,7 +897,7 @@ function mountMaze(ctx) {
     flat = flatCanvas.getContext('2d');
     view.replaceChildren(flatCanvas, minimap);
     resize();
-    ctx.setHint('W / ↑ walk · A D or ← → turn · ⛶ fullscreen for mouse look');
+    ctx.setHint('W S walk · A D strafe · ← → turn · space sprint · ⛶ mouse look');
     ctx.setStatus(`${reason} Playing in 2D instead.`);
     loadLevel();
     start();
@@ -869,8 +919,9 @@ function mountMaze(ctx) {
     bob = walking ? bob + dt * 9 : 0;
     const eye = EYE_HEIGHT + (walking ? Math.sin(bob) * 0.035 : 0);
 
-    if (torch) torch.intensity = 2.1 + Math.sin(seconds * 11) * 0.14 + Math.sin(seconds * 4.3) * 0.1;
-    if (exitGlow) exitGlow.intensity = 1.8 + Math.sin(seconds * 3) * 0.7;
+    // The exit still pulses — it is the one thing that should catch your eye.
+    // The walls are lit only by the sky, with no flicker on them at all.
+    if (exitGlow) exitGlow.intensity = 1.4 + Math.sin(seconds * 3) * 0.5;
     if (exitPillar) exitPillar.rotation.y += dt * 0.6;
 
     if (flat) {
@@ -945,7 +996,7 @@ function mountMaze(ctx) {
     level = 0;
     seconds = 0;
     courseDone = false;
-    input.forward = input.back = input.left = input.right = false;
+    Object.keys(input).forEach((k) => { input[k] = false; });
 
     scoreRow.set('time', clock(0));
     scoreRow.set('best', storage.get(bestKey()) ? clock(storage.get(bestKey())) : '—');
@@ -960,16 +1011,19 @@ function mountMaze(ctx) {
 
   /* ---------- input ---------- */
 
+  /* A and D strafe rather than turn — turning is the arrow keys or the mouse.
+     Space sprints while held. */
   const KEYS = {
     ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right',
-    w: 'up', s: 'down', a: 'left', d: 'right',
-    W: 'up', S: 'down', A: 'left', D: 'right',
+    w: 'up', s: 'down', a: 'strafeLeft', d: 'strafeRight',
+    W: 'up', S: 'down', A: 'strafeLeft', D: 'strafeRight',
+    ' ': 'sprint',
   };
 
   function onKeyDown(event) {
     const dir = KEYS[event.key];
     if (!dir) return;
-    event.preventDefault();
+    event.preventDefault();   // stops space scrolling the page
     setInput(dir, true);
   }
 
@@ -1081,7 +1135,7 @@ if (typeof registerGame !== 'undefined') {
 if (typeof module !== 'undefined') {
   module.exports = {
     buildMaze, solveMaze, isWall, createWalker, stepWalker, moveWalker,
-    MAZE_COURSES, courseById, WALKER_RADIUS, WALK_SPEED, TURN_SPEED,
+    MAZE_COURSES, courseById, WALKER_RADIUS, WALK_SPEED, TURN_SPEED, SPRINT_MULTIPLIER,
     drawRaycast, drawMinimap, cellKey, MAZE_FOV, WALL_HEIGHT, EYE_HEIGHT,
   };
 }

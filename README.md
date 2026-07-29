@@ -78,7 +78,12 @@ grid with a shortest route of around 940 steps.
 
 Brick walls, tiled floors and the sky are painted onto 2D canvases at load
 time and used as textures, so there are still no image files to download. The
-maze is open to a star-lit night sky rather than roofed, lit by moonlight.
+maze is open to a dusk sky rather than roofed — the sun just going down, the
+first stars out — and lit by that sky rather than by a lamp on the camera, so
+the walls stay matte instead of glowing.
+
+Controls: **W S** walk, **A D** strafe, **arrow keys** turn, **space** sprint,
+and the mouse once you are fullscreen.
 
 The minimap shows three things and nothing else: where you are, where you have
 been, and where the exit is. It never draws walls you have not walked past and
