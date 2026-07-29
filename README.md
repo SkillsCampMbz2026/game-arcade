@@ -96,6 +96,40 @@ wall meets the floor is most of what stops a corridor reading as flat
 cardboard, and being painted in it costs nothing at runtime: no extra lights,
 no shadow maps.
 
+### Keeping it smooth
+
+The 2D fallback draws the same brickwork by cutting one-pixel-wide slices out
+of that same texture with `drawImage`, one per screen column. It used to paint
+each feature — bond, bed joint, two bevels, perpend, contact shading — as its
+own fill, which came to roughly **forty fill calls per column: 68,000 canvas
+calls a frame** at fullscreen width. No 2D canvas services that at sixty frames
+a second, and it showed. One textured slice per column replaced the lot, and
+carries more detail than the hand-drawn version did.
+
+The rest of the frame budget went the same way:
+
+- Rays are cast every second or third pixel and filled that wide. Wall slices
+  are vertical, so the granularity on their edges is invisible.
+- Both renderers draw into a buffer capped in size and let CSS stretch it.
+  Fullscreen on a large display is otherwise several times the pixels of the
+  windowed view, and the WebGL path took its pixel ratio straight from the
+  device — 2× on a fullscreen 1440p panel is fifteen million pixels a frame.
+  It comes from a budget now, and multisampling is off: it costs more than it
+  returns on flat-coloured walls.
+- Trail squares are packed into single numbers instead of "x,y" strings. The
+  minimap repaints the whole trail, which by the end of a large run is a few
+  thousand squares, and re-parsing a string key each time meant tens of
+  thousands of throwaway arrays a second for the collector to mop up. The
+  minimap is also repainted eighteen times a second rather than sixty.
+- The route search reuses its working arrays and marks visited squares with a
+  generation stamp, so there is no allocation and no 11,000-entry clear per
+  call — the cost is proportional to the squares actually reached, not to the
+  size of the maze. The monster runs one several times a second.
+
+Together that is **68,000 draw calls a frame down to under 3,000**, and the
+renderer's own time from 10 ms to 0.4 ms. The test suite holds a budget on the
+call count, so a future flourish that undoes this fails loudly.
+
 Controls: **W S** walk, **A D** strafe, **arrow keys** turn, **space** sprint,
 and the mouse once you are fullscreen. You will want the sprint.
 
