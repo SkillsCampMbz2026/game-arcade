@@ -12,6 +12,7 @@
 const THREE_SRC = 'vendor/three.min.js';
 const BRICK_TEX = 256;   // texture edge, in pixels
 const FACE_TEX = 256;    // the creature's face, likewise
+const GUN_TEX = 256;     // and the gun in your hands
 
 /* Pick a size and you get a run of three mazes at that scale, each a little
    bigger than the last. Escaping one drops you straight into the next; the
@@ -26,6 +27,10 @@ const MAZE_COURSES = [
 ];
 
 const courseById = (id) => MAZE_COURSES.find((c) => c.id === id) || MAZE_COURSES[1];
+
+/* How many are hunting you. They share the maze rather than the health bar:
+   each one has its own hundred points and its own route to you. */
+const MAZE_PACKS = [1, 2, 3, 4, 5];
 
 const WALKER_RADIUS = 0.26;    // in cells; keeps you off the wall faces
 const WALK_SPEED = 3.1;        // cells per second
@@ -278,9 +283,9 @@ const SPRINT_FLOOR = 12;         // needed before a sprint can start again
 // The minimap is repainted this often rather than every frame.
 const MINIMAP_PERIOD = 1 / 18;
 
-function createMonster(maze, walker, rng = Math.random, minGap = MONSTER_MIN_START) {
-  // Spawn as far away as the maze allows, but never on the exit — being made
-  // to walk into the monster to finish would not be a fair maze.
+/* Somewhere to appear: as far from the player as the maze allows, and never
+   near the exit — being made to walk into one to finish would not be fair. */
+function spawnSpot(maze, walker, minGap, rng) {
   const far = [];
   let best = null;
   let bestGap = -1;
@@ -295,9 +300,13 @@ function createMonster(maze, walker, rng = Math.random, minGap = MONSTER_MIN_STA
     }
   }
 
-  // A respawn asks for more room than the maze may have anywhere; take the
+  // A respawn asks for more room than a small maze has anywhere; take the
   // furthest square there is rather than giving up and landing on the player.
-  const spot = far.length ? far[Math.floor(rng() * far.length)] : (best || { ...maze.exit });
+  return far.length ? far[Math.floor(rng() * far.length)] : (best || { ...maze.exit });
+}
+
+function createMonster(maze, walker, rng = Math.random, minGap = MONSTER_MIN_START) {
+  const spot = spawnSpot(maze, walker, minGap, rng);
 
   return {
     x: spot.x + 0.5,
@@ -310,6 +319,51 @@ function createMonster(maze, walker, rng = Math.random, minGap = MONSTER_MIN_STA
     touching: false,
     flinch: 0,                     // counts down after a hit, for the flash
   };
+}
+
+/* Back on its feet somewhere else. The same object is reused rather than
+   replaced: each creature in the 3D scene is matched to a monster by index, and
+   swapping the object out would break that pairing. */
+function respawnMonster(maze, walker, monster, rng = Math.random, minGap = RESPAWN_MIN) {
+  const spot = spawnSpot(maze, walker, minGap, rng);
+  monster.x = spot.x + 0.5;
+  monster.y = spot.y + 0.5;
+  monster.path = [];
+  monster.sinceRepath = MONSTER_REPATH;
+  monster.health = MONSTER_HEALTH;
+  monster.dead = false;
+  monster.touching = false;
+  monster.flinch = 0;
+  return monster;
+}
+
+/* Which of them a shot would land on: the nearest one that is both inside the
+   cone you are pointing down and not behind a wall. */
+function pickTarget(maze, walker, monsters, range = SHOT_RANGE) {
+  let best = null;
+  let bestGap = Infinity;
+
+  for (const monster of monsters || []) {
+    if (!shotHits(maze, walker, monster, range)) continue;
+    const gap = Math.hypot(monster.x - walker.x, monster.y - walker.y);
+    if (gap < bestGap) { bestGap = gap; best = monster; }
+  }
+
+  return best;
+}
+
+// The closest of them, which is what the drone and the healing rule care about.
+function nearestMonster(monsters, walker) {
+  let best = null;
+  let bestGap = Infinity;
+
+  for (const monster of monsters || []) {
+    if (monster.dead) continue;
+    const gap = Math.hypot(monster.x - walker.x, monster.y - walker.y);
+    if (gap < bestGap) { bestGap = gap; best = monster; }
+  }
+
+  return best;
 }
 
 function stepMonster(maze, monster, walker, dt) {
@@ -417,7 +471,7 @@ function monsterCloseness(monster, walker) {
    Deliberately nothing else — no walls, no unexplored ground and above all no
    route to the exit, so it helps you keep track without solving the maze for
    you. */
-function drawMinimap(g, maze, walker, size, monster) {
+function drawMinimap(g, maze, walker, size, monsters) {
   const cell = size / Math.max(maze.w, maze.h);
 
   g.clearRect(0, 0, size, size);
@@ -439,11 +493,13 @@ function drawMinimap(g, maze, walker, size, monster) {
     (maze.exit.y + 0.5) * cell - marker / 2,
     marker, marker);
 
-  // The monster, but only once it is close enough that you would hear it —
-  // a map that tracked it across the whole maze would remove all the tension.
-  if (monster && monsterCloseness(monster, walker) > 0.35) {
-    const blip = Math.max(3, cell * 1.5);
-    g.fillStyle = '#ef4444';
+  /* Each of them, but only once it is close enough that you would hear it
+     anyway — a map that tracked the pack across the whole maze would remove
+     all the tension. */
+  const blip = Math.max(3, cell * 1.5);
+  g.fillStyle = '#ef4444';
+  for (const monster of monsters || []) {
+    if (monster.dead || monsterCloseness(monster, walker) <= 0.35) continue;
     g.beginPath();
     g.arc(monster.x * cell, monster.y * cell, blip / 2, 0, Math.PI * 2);
     g.fill();
@@ -565,7 +621,7 @@ function blend(a, b, t) {
   return `rgb(${Math.round(ar + (br - ar) * k)}, ${Math.round(ag + (bg - ag) * k)}, ${Math.round(ab + (bb - ab) * k)})`;
 }
 
-function drawRaycast(g, maze, walker, pitch, width, height, monster) {
+function drawRaycast(g, maze, walker, pitch, width, height, monsters, recoil = 0) {
   const fov = (MAZE_FOV * Math.PI) / 180;
   const planeHalf = Math.tan(fov / 2);
   const project = width / 2 / planeHalf;         // world units to pixels at 1 away
@@ -578,10 +634,13 @@ function drawRaycast(g, maze, walker, pitch, width, height, monster) {
 
   // Dusk above the horizon, dark tiled ground below it.
   const sky = g.createLinearGradient(0, 0, 0, Math.max(1, horizon));
-  sky.addColorStop(0, '#2f568f');
-  sky.addColorStop(0.42, '#78a3d6');
-  sky.addColorStop(0.78, '#cfdcE6');
-  sky.addColorStop(1, '#f3bb84');
+  sky.addColorStop(0, '#1d3f70');
+  sky.addColorStop(0.2, '#2f568f');
+  sky.addColorStop(0.45, '#6d9ad0');
+  sky.addColorStop(0.66, '#a8c4dc');
+  sky.addColorStop(0.8, '#cdd8dc');
+  sky.addColorStop(0.92, '#e8c9a0');
+  sky.addColorStop(1, '#f3b378');
   g.fillStyle = sky;
   g.fillRect(0, 0, width, Math.max(0, horizon));
 
@@ -745,15 +804,20 @@ function drawRaycast(g, maze, walker, pitch, width, height, monster) {
 
   }
 
-  // The monster, billboarded and depth-tested like the exit.
-  if (monster && !monster.dead) {
-    const spot = floorPoint(monster.x, monster.y);
-    const gap = Math.hypot(monster.x - walker.x, monster.y - walker.y);
-    if (spot && gap > 0.05) {
-      const camY = (EYE_HEIGHT / (spot.y - horizon)) * project;
-      const tall = (project / camY) * 1.45;
-      drawCreature(g, spot.x, spot.y, tall * 0.42, tall, camY, depth, width, monster.flinch);
-    }
+  // The pack, billboarded and depth-tested like the exit.
+  /* Furthest first, so a nearer one paints over the one behind it. Sorting a
+     copy: the caller's array is the live game state. */
+  const pack = (monsters || [])
+    .filter((m) => !m.dead)
+    .map((m) => ({ m, gap: Math.hypot(m.x - walker.x, m.y - walker.y) }))
+    .sort((a, b) => b.gap - a.gap);
+
+  for (const { m, gap } of pack) {
+    const spot = floorPoint(m.x, m.y);
+    if (!spot || gap <= 0.05) continue;
+    const camY = (EYE_HEIGHT / (spot.y - horizon)) * project;
+    const tall = (project / camY) * 1.45;
+    drawCreature(g, spot.x, spot.y, tall * 0.42, tall, camY, depth, width, m.flinch);
   }
 
   // The exit, billboarded and depth-tested against the wall slices.
@@ -770,6 +834,9 @@ function drawRaycast(g, maze, walker, pitch, width, height, monster) {
       g.fillRect(x, exit.y - size * 1.5, 1, size * 1.5);
     }
   }
+
+  // Your own gun, over everything else.
+  drawGun(g, width, height, recoil);
 }
 
 /* ---------- the game module ---------- */
@@ -861,9 +928,16 @@ function paintBrick(g, size) {
   const brickH = size / rows;
   const brickW = size / cols;
 
-  g.fillStyle = '#8b9198';                       // mortar
+  // Mortar, deliberately uneven — a perfectly flat bed is the giveaway.
+  g.fillStyle = '#8b9198';
   g.fillRect(0, 0, size, size);
-  speckle(g, 0, 0, size, size, 400, 0.12);
+  speckle(g, 0, 0, size, size, 500, 0.1);
+  for (let i = 0; i < 260; i++) {
+    const n = jitter(i, 7);
+    const m = jitter(i, 13);
+    g.fillStyle = `rgba(${100 + Math.round(n * 40)}, ${104 + Math.round(n * 38)}, 112, 0.3)`;
+    g.fillRect(m * size, n * size, 1 + n * 3, 1 + m * 2);
+  }
 
   for (let row = 0; row < rows; row++) {
     const offset = (row % 2) * 0.5;
@@ -872,43 +946,87 @@ function paintBrick(g, size) {
       const y = Math.round(row * brickH);
       const w = Math.round(brickW) - 3;
       const h = Math.round(brickH) - 3;
+      const rn = jitter(row, i);
+      const rn2 = jitter(i, row + 31);
 
-      // Alternate the two tones in a running bond, then nudge each brick a
-      // few points either way so no two neighbours are exactly equal.
+      /* Two base tones in a running bond, then every brick shifted in value
+         AND in hue: real brick and stone vary warm to cool, not just light to
+         dark, and a wall of pure greys is what reads as computer-generated. */
       const offWhite = (row + i) % 2 === 0;
-      const base = offWhite ? 233 : 194;
-      const tone = Math.round(base + (jitter(row, i) - 0.5) * 22);
-      g.fillStyle = `rgb(${tone}, ${tone + 2}, ${tone + 6})`;
+      const aged = rn2 > 0.86;                  // the occasional much darker one
+      const base = (offWhite ? 231 : 196) - (aged ? 34 : 0);
+      const v = Math.round(base + (rn - 0.5) * 24);
+      const warm = (rn2 - 0.5) * 12;            // + toward sand, - toward slate
+      g.fillStyle = `rgb(${v + Math.round(warm)}, ${v + Math.round(warm * 0.3)}, ${v - Math.round(warm * 0.7)})`;
       g.fillRect(x + 2, y + 2, w, h);
 
-      speckle(g, x + 2, y + 2, Math.max(1, w), Math.max(1, h), 16, offWhite ? 0.85 : 0.6);
+      speckle(g, x + 2, y + 2, Math.max(1, w), Math.max(1, h), 18, offWhite ? 0.8 : 0.55);
+
+      // A wash of blotching across the face, so no brick is one flat colour.
+      for (let b = 0; b < 3; b++) {
+        const bn = jitter(row * 7 + b, i * 5);
+        const bm = jitter(i * 11 + b, row * 3);
+        g.fillStyle = `rgba(${bn > 0.5 ? 255 : 92}, ${bn > 0.5 ? 253 : 96}, ${bn > 0.5 ? 246 : 104}, 0.07)`;
+        g.beginPath();
+        g.ellipse(x + 2 + bm * w, y + 2 + bn * h, w * 0.3, h * 0.42, bn * 3, 0, Math.PI * 2);
+        g.fill();
+      }
 
       // Bevel: light along the top and left, shadow along the bottom edge.
-      g.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      g.fillStyle = 'rgba(255, 255, 255, 0.42)';
       g.fillRect(x + 2, y + 2, w, 1);
       g.fillRect(x + 2, y + 2, 1, h);
-      g.fillStyle = 'rgba(80, 88, 96, 0.28)';
+      g.fillStyle = 'rgba(74, 82, 92, 0.3)';
       g.fillRect(x + 2, y + h + 1, w, 1);
       g.fillRect(x + w + 1, y + 2, 1, h);
+
+      // A chipped corner here and there, showing the mortar behind.
+      if (rn > 0.9) {
+        const cw = Math.max(2, w * 0.16);
+        g.fillStyle = 'rgba(126, 132, 140, 0.85)';
+        g.beginPath();
+        g.moveTo(x + 2 + w - cw, y + h + 1);
+        g.lineTo(x + 2 + w, y + h + 1);
+        g.lineTo(x + 2 + w, y + h + 1 - cw);
+        g.closePath();
+        g.fill();
+      }
+    }
+  }
+
+  /* Grime running down from the bed joints. Water tracks down a wall and leaves
+     stains under every horizontal joint, and that streaking is most of what
+     separates weathered masonry from a clean tiling pattern. */
+  for (let row = 1; row < rows; row++) {
+    for (let i = 0; i < 7; i++) {
+      const n = jitter(row * 17, i * 3);
+      if (n > 0.55) continue;
+      const x = n * size;
+      const y = row * brickH;
+      const run = brickH * (0.5 + n * 2.6);
+      const streak = g.createLinearGradient(0, y, 0, y + run);
+      streak.addColorStop(0, 'rgba(84, 88, 94, 0.3)');
+      streak.addColorStop(1, 'rgba(84, 88, 94, 0)');
+      g.fillStyle = streak;
+      g.fillRect(x, y, 1 + n * 5, run);
     }
   }
 
   // Baked shading: dark where the wall meets the floor, a touch of shade up
   // under the capstone, and a wash of grime low down.
-  const foot = g.createLinearGradient(0, size * 0.62, 0, size);
+  const foot = g.createLinearGradient(0, size * 0.6, 0, size);
   foot.addColorStop(0, 'rgba(24, 30, 40, 0)');
-  foot.addColorStop(1, 'rgba(24, 30, 40, 0.42)');
+  foot.addColorStop(1, 'rgba(22, 28, 38, 0.46)');
   g.fillStyle = foot;
-  g.fillRect(0, size * 0.62, size, size * 0.38);
+  g.fillRect(0, size * 0.6, size, size * 0.4);
 
-  const head = g.createLinearGradient(0, 0, 0, size * 0.12);
-  head.addColorStop(0, 'rgba(40, 46, 56, 0.3)');
+  const head = g.createLinearGradient(0, 0, 0, size * 0.13);
+  head.addColorStop(0, 'rgba(40, 46, 56, 0.32)');
   head.addColorStop(1, 'rgba(40, 46, 56, 0)');
   g.fillStyle = head;
-  g.fillRect(0, 0, size, size * 0.12);
+  g.fillRect(0, 0, size, size * 0.13);
 }
 
-// Capstone for the wall tops, which are on show with no ceiling.
 function paintCap(g, size) {
   g.fillStyle = '#d5d7d4';
   g.fillRect(0, 0, size, size);
@@ -929,28 +1047,77 @@ function paintFloor(g, size) {
   const cells = 4;
   const step = size / cells;
 
-  g.fillStyle = '#101318';                       // grout
+  // Grout, uneven, with grit sitting in it.
+  g.fillStyle = '#101318';
   g.fillRect(0, 0, size, size);
-  speckle(g, 0, 0, size, size, 300, 0.08);
+  speckle(g, 0, 0, size, size, 340, 0.07);
 
   for (let ty = 0; ty < cells; ty++) {
     for (let tx = 0; tx < cells; tx++) {
       const x = tx * step + 2;
       const y = ty * step + 2;
       const w = step - 4;
-      const shade = 54 + ((tx + ty) % 2) * 7 + Math.round(jitter(tx, ty) * 8);
-      g.fillStyle = `rgb(${shade}, ${shade + 2}, ${shade + 5})`;
+      const n = jitter(tx, ty);
+      const n2 = jitter(tx + 17, ty + 5);
+
+      // Each slab a different cast — poured concrete never matches its
+      // neighbour, and four identical greys read as vinyl.
+      const shade = 52 + ((tx + ty) % 2) * 7 + Math.round(n * 10);
+      const cool = Math.round((n2 - 0.5) * 7);
+      g.fillStyle = `rgb(${shade - cool}, ${shade + 1}, ${shade + 5 + cool})`;
       g.fillRect(x, y, w, w);
-      speckle(g, x, y, w, w, 26, 0.5);
+
+      // Blotching across the face, at a bigger scale than the grain.
+      for (let b = 0; b < 4; b++) {
+        const bn = jitter(tx * 13 + b, ty * 7);
+        const bm = jitter(ty * 11 + b, tx * 3);
+        g.fillStyle = bn > 0.5
+          ? `rgba(200, 210, 226, ${0.03 + bn * 0.03})`
+          : `rgba(4, 7, 12, ${0.05 + bn * 0.06})`;
+        g.beginPath();
+        g.ellipse(x + bm * w, y + bn * w, w * 0.34, w * 0.26, bn * 3, 0, Math.PI * 2);
+        g.fill();
+      }
+
+      speckle(g, x, y, w, w, 30, 0.45);
+
+      /* A hairline crack across some slabs, wandering rather than straight.
+         One crooked line does more for a concrete floor than any amount of
+         extra grain. */
+      if (n2 > 0.62) {
+        g.strokeStyle = 'rgba(6, 9, 14, 0.5)';
+        g.lineWidth = 1;
+        g.beginPath();
+        let cx = x + n * w;
+        let cy = y;
+        g.moveTo(cx, cy);
+        for (let seg = 1; seg <= 6; seg++) {
+          cx += (jitter(tx + seg, ty * 3) - 0.5) * w * 0.4;
+          cy += w / 6;
+          g.lineTo(cx, cy);
+        }
+        g.stroke();
+      }
 
       // Each slab catches a little light along its top-left corner.
       g.fillStyle = 'rgba(226, 232, 240, 0.1)';
       g.fillRect(x, y, w, 1);
       g.fillRect(x, y, 1, w);
-      g.fillStyle = 'rgba(6, 9, 14, 0.35)';
+      g.fillStyle = 'rgba(6, 9, 14, 0.38)';
       g.fillRect(x, y + w - 1, w, 1);
       g.fillRect(x + w - 1, y, 1, w);
     }
+  }
+
+  // A couple of damp patches, spanning slabs and ignoring the grid.
+  for (let i = 0; i < 3; i++) {
+    const n = jitter(i * 29, 41);
+    const m = jitter(i * 13, 91);
+    const damp = g.createRadialGradient(m * size, n * size, 2, m * size, n * size, size * 0.22);
+    damp.addColorStop(0, 'rgba(2, 5, 10, 0.3)');
+    damp.addColorStop(1, 'rgba(2, 5, 10, 0)');
+    g.fillStyle = damp;
+    g.fillRect(0, 0, size, size);
   }
 }
 
@@ -958,66 +1125,102 @@ function paintFloor(g, size) {
    warming through to a golden horizon, with only the first few stars high
    up rather than a full night sky. */
 function paintSky(g, size) {
+  /* More stops than a sky strictly needs. Real twilight is not a linear ramp —
+     it holds its blue, then turns quickly through green-grey into the warm band
+     just above the horizon, and a three-stop gradient shows its seams. */
   const grad = g.createLinearGradient(0, 0, 0, size);
-  grad.addColorStop(0, '#2f568f');
-  grad.addColorStop(0.34, '#6d9ad0');
-  grad.addColorStop(0.62, '#b9cfe2');
-  grad.addColorStop(0.82, '#f0c48a');
-  grad.addColorStop(1, '#f6a86a');
+  grad.addColorStop(0, '#1d3f70');
+  grad.addColorStop(0.18, '#2f568f');
+  grad.addColorStop(0.4, '#6d9ad0');
+  grad.addColorStop(0.58, '#a8c4dc');
+  grad.addColorStop(0.7, '#cdd8dc');
+  grad.addColorStop(0.8, '#e8c9a0');
+  grad.addColorStop(0.9, '#f3b378');
+  grad.addColorStop(1, '#ef9a5e');
   g.fillStyle = grad;
   g.fillRect(0, 0, size, size);
 
-  // Early stars only, and only in the darker upper band.
+  // Stars, only in the darker upper band, a few of them bright.
   let n = 987654321;
-  for (let i = 0; i < 90; i++) {
+  for (let i = 0; i < 140; i++) {
     n = (n * 1664525 + 1013904223) >>> 0;
     const x = n % size;
-    const y = (n >> 7) % Math.floor(size * 0.3);
-    const bright = 0.2 + ((n >> 20) % 45) / 100;
+    const y = (n >> 7) % Math.floor(size * 0.34);
+    const high = 1 - y / (size * 0.34);
+    const bright = (0.15 + ((n >> 20) % 50) / 100) * high;
     g.fillStyle = `rgba(255, 255, 255, ${bright})`;
-    g.fillRect(x, y, 1, 1);
+    const big = ((n >> 15) % 100) > 94;
+    if (big) {
+      // A handful get a cross of light rather than a single pixel.
+      g.fillRect(x - 1, y, 3, 1);
+      g.fillRect(x, y - 1, 1, 3);
+    } else {
+      g.fillRect(x, y, 1, 1);
+    }
   }
 
-  // The sun just going down, low enough to sit near the horizon.
+  // The sun just going down: a tight core inside a wide bloom.
   const sunX = size * 0.7;
   const sunY = size * 0.8;
-  const glow = g.createRadialGradient(sunX, sunY, 6, sunX, sunY, 130);
-  glow.addColorStop(0, 'rgba(255, 226, 170, 0.65)');
-  glow.addColorStop(1, 'rgba(255, 226, 170, 0)');
-  g.fillStyle = glow;
-  g.fillRect(sunX - 135, sunY - 135, 270, 270);
+  const bloom = g.createRadialGradient(sunX, sunY, 4, sunX, sunY, size * 0.42);
+  bloom.addColorStop(0, 'rgba(255, 236, 196, 0.75)');
+  bloom.addColorStop(0.25, 'rgba(255, 214, 150, 0.28)');
+  bloom.addColorStop(1, 'rgba(255, 200, 140, 0)');
+  g.fillStyle = bloom;
+  g.fillRect(0, 0, size, size);
 
-  /* Cloud bands across the middle of the sky, lit warm from below by the
-     setting sun and cool on top. Flat gradients, no sprites — an empty
-     gradient sky is the one thing that gives a dome away as a dome. */
+  g.fillStyle = 'rgba(255, 246, 220, 0.85)';
+  g.beginPath();
+  g.arc(sunX, sunY, size * 0.028, 0, Math.PI * 2);
+  g.fill();
+
+  /* Cloud banks, built up from several passes of decreasing size and rising
+     opacity. Soft edges are the whole point: one flat ellipse reads as a
+     lozenge no matter how you shape it, and stacked translucent passes give the
+     fall-off that makes it read as vapour. */
   let c = 24680;
-  for (let i = 0; i < 16; i++) {
+  for (let i = 0; i < 18; i++) {
     c = (c * 1664525 + 1013904223) >>> 0;
-    const cx = (c % size);
-    const cy = size * 0.4 + ((c >> 8) % Math.floor(size * 0.4));
-    const cw = 40 + ((c >> 16) % 90);
-    const warmth = Math.min(1, Math.max(0, (cy / size - 0.4) / 0.4));
-
-    const band = g.createLinearGradient(0, cy - cw * 0.16, 0, cy + cw * 0.16);
-    band.addColorStop(0, `rgba(232, 240, 252, ${0.16 + warmth * 0.1})`);
-    band.addColorStop(1, `rgba(255, ${Math.round(214 + warmth * 30)}, 176, ${0.1 + warmth * 0.24})`);
-    g.fillStyle = band;
-
-    /* Built from several unequal lobes in a single path: one ellipse reads
-       as a lozenge, five overlapping ones read as cloud. Single path so the
-       overlaps do not double-composite into visible seams. */
-    g.beginPath();
-    for (let lobe = 0; lobe < 5; lobe++) {
+    const cx = c % size;
+    const cy = size * 0.36 + ((c >> 8) % Math.floor(size * 0.46));
+    const cw = 42 + ((c >> 16) % 96);
+    const warmth = Math.min(1, Math.max(0, (cy / size - 0.36) / 0.46));
+    const lobes = [];
+    for (let lobe = 0; lobe < 6; lobe++) {
       c = (c * 1664525 + 1013904223) >>> 0;
-      const ox = (lobe / 4 - 0.5) * cw * 1.6;
-      const oy = ((c >> 4) % 9) - 4;
-      const rx = cw * (0.3 + ((c >> 12) % 30) / 100);
-      const ry = rx * (0.16 + ((c >> 22) % 14) / 100);
-      g.moveTo(cx + ox + rx, cy + oy);
-      g.ellipse(cx + ox, cy + oy, rx, ry, 0, 0, Math.PI * 2);
+      lobes.push([
+        (lobe / 5 - 0.5) * cw * 1.7,
+        ((c >> 4) % 11) - 5,
+        cw * (0.26 + ((c >> 12) % 32) / 100),
+        0.14 + ((c >> 22) % 12) / 100,
+      ]);
     }
-    g.fill();
+
+    for (const [scale, alpha] of [[1.25, 0.1], [1, 0.16], [0.7, 0.2], [0.42, 0.22]]) {
+      const top = `rgba(238, 245, 255, ${alpha * (1 - warmth * 0.35)})`;
+      const under = `rgba(255, ${Math.round(206 + warmth * 34)}, ${Math.round(168 + warmth * 20)}, ${alpha * (0.5 + warmth)})`;
+      const band = g.createLinearGradient(0, cy - cw * 0.2, 0, cy + cw * 0.2);
+      band.addColorStop(0, top);
+      band.addColorStop(1, under);
+      g.fillStyle = band;
+
+      g.beginPath();
+      for (const [ox, oy, rx, squash] of lobes) {
+        const w = rx * scale;
+        const h = rx * squash * scale;
+        g.moveTo(cx + ox * scale + w, cy + oy - cw * 0.03 * (1 - scale));
+        g.ellipse(cx + ox * scale, cy + oy - cw * 0.03 * (1 - scale), w, h, 0, 0, Math.PI * 2);
+      }
+      g.fill();
+    }
   }
+
+  // A brighter band sitting on the horizon, where the air is thickest.
+  const haze = g.createLinearGradient(0, size * 0.86, 0, size);
+  haze.addColorStop(0, 'rgba(255, 226, 186, 0)');
+  haze.addColorStop(1, 'rgba(255, 226, 186, 0.42)');
+  g.fillStyle = haze;
+  g.fillRect(0, size * 0.86, size, size * 0.14);
 }
 
 /* The creature's face, on a transparent square.
@@ -1093,6 +1296,149 @@ function paintFace(g, size) {
       g.fill();
     }
   }
+}
+
+/* The gun, as you hold it: seen from behind and above, angled up and to the
+   left out of the bottom-right corner of the screen.
+
+   Painted on a transparent square and used by both renderers, the same trick as
+   the face — a plane pinned to the camera in 3D, a blit into the corner in the
+   2D fallback — so there is one drawing of it rather than two that drift. */
+function paintGun(g, size) {
+  const u = size / 100;                          // work in percentages of the square
+  const metal = (x0, y0, x1, y1, top, bottom) => {
+    const grad = g.createLinearGradient(x0 * u, y0 * u, x1 * u, y1 * u);
+    grad.addColorStop(0, top);
+    grad.addColorStop(0.45, bottom);
+    grad.addColorStop(1, top);
+    return grad;
+  };
+
+  // Forearm and glove, coming in from the bottom-right corner.
+  g.fillStyle = '#7c4a21';
+  g.beginPath();
+  g.moveTo(72 * u, 100 * u);
+  g.lineTo(100 * u, 100 * u);
+  g.lineTo(100 * u, 62 * u);
+  g.lineTo(62 * u, 84 * u);
+  g.closePath();
+  g.fill();
+
+  // Grip, angled back into the hand.
+  g.fillStyle = '#25201c';
+  g.beginPath();
+  g.moveTo(46 * u, 52 * u);
+  g.lineTo(62 * u, 56 * u);
+  g.lineTo(72 * u, 92 * u);
+  g.lineTo(52 * u, 88 * u);
+  g.closePath();
+  g.fill();
+
+  // Trigger guard.
+  g.strokeStyle = '#2f2a25';
+  g.lineWidth = 4 * u;
+  g.beginPath();
+  g.arc(52 * u, 58 * u, 9 * u, 0.2, Math.PI * 1.1);
+  g.stroke();
+
+  // The hand closed round it: palm, then fingers over the front of the grip.
+  g.fillStyle = '#c2741f';
+  g.beginPath();
+  g.ellipse(63 * u, 78 * u, 14 * u, 11 * u, -0.5, 0, Math.PI * 2);
+  g.fill();
+  g.fillStyle = '#d98324';
+  for (let i = 0; i < 3; i++) {
+    g.beginPath();
+    g.ellipse((52 + i * 3.4) * u, (66 + i * 7) * u, 6.5 * u, 4 * u, -0.42, 0, Math.PI * 2);
+    g.fill();
+  }
+  g.strokeStyle = 'rgba(120, 66, 12, 0.5)';
+  g.lineWidth = 1.2 * u;
+  for (let i = 0; i < 3; i++) {
+    g.beginPath();
+    g.moveTo((47 + i * 3.4) * u, (63 + i * 7) * u);
+    g.lineTo((58 + i * 3.4) * u, (69 + i * 7) * u);
+    g.stroke();
+  }
+
+  // Frame and slide, running away up and to the left.
+  g.fillStyle = metal(30, 30, 30, 56, '#4b5257', '#8f979d');
+  g.beginPath();
+  g.moveTo(8 * u, 34 * u);
+  g.lineTo(58 * u, 46 * u);
+  g.lineTo(56 * u, 60 * u);
+  g.lineTo(6 * u, 46 * u);
+  g.closePath();
+  g.fill();
+
+  g.fillStyle = metal(28, 22, 28, 38, '#5c646a', '#a8b1b7');
+  g.beginPath();
+  g.moveTo(10 * u, 24 * u);
+  g.lineTo(56 * u, 36 * u);
+  g.lineTo(58 * u, 46 * u);
+  g.lineTo(8 * u, 34 * u);
+  g.closePath();
+  g.fill();
+
+  // Slide serrations, and the front sight at the muzzle.
+  g.strokeStyle = 'rgba(20, 24, 28, 0.55)';
+  g.lineWidth = 1.6 * u;
+  for (let i = 0; i < 6; i++) {
+    const x = (38 + i * 3.2) * u;
+    g.beginPath();
+    g.moveTo(x, 33 * u);
+    g.lineTo(x + 1.5 * u, 44 * u);
+    g.stroke();
+  }
+
+  g.fillStyle = '#3d4348';
+  g.fillRect(9 * u, 19 * u, 5 * u, 6 * u);       // front sight
+  g.fillStyle = '#1b1f23';
+  g.beginPath();                                  // muzzle
+  g.ellipse(9 * u, 29 * u, 3.4 * u, 5 * u, 0, 0, Math.PI * 2);
+  g.fill();
+
+  // A highlight along the top of the slide, so it reads as metal.
+  g.fillStyle = 'rgba(255, 255, 255, 0.3)';
+  g.beginPath();
+  g.moveTo(11 * u, 25 * u);
+  g.lineTo(55 * u, 37 * u);
+  g.lineTo(55 * u, 39.5 * u);
+  g.lineTo(11 * u, 27.5 * u);
+  g.closePath();
+  g.fill();
+}
+
+let gunSlab = null;
+
+function gunCanvas() {
+  if (gunSlab !== null) return gunSlab;
+  gunSlab = false;
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = GUN_TEX;
+    canvas.height = GUN_TEX;
+    const g = canvas.getContext('2d');
+    if (g) {
+      paintGun(g, GUN_TEX);
+      gunSlab = canvas;
+    }
+  } catch {
+    gunSlab = false;
+  }
+  return gunSlab;
+}
+
+/* The gun in the corner of the 2D view. Recoil runs 0..1 and kicks it down and
+   back, which is what makes a shot feel like it left the barrel. */
+function drawGun(g, width, height, recoil = 0) {
+  const slab = gunCanvas();
+  if (!slab) return;
+
+  const size = Math.max(170, Math.min(width * 0.4, height * 0.72));
+  const kick = recoil * size * 0.09;
+  g.drawImage(slab, 0, 0, GUN_TEX, GUN_TEX,
+    width - size * 0.88 + kick * 0.5, height - size * 0.82 + kick, size, size);
 }
 
 let faceSlab = null;
@@ -1184,13 +1530,16 @@ function makeTextures() {
   const floor = paintCanvas(256, paintFloor);
   const fur = paintCanvas(128, paintFur);
   const face = paintCanvas(FACE_TEX, paintFace);
+  const gun = paintCanvas(GUN_TEX, paintGun);
   const sky = paintCanvas(512, paintSky);
   sky.wrapS = THREE.ClampToEdgeWrapping;
   sky.wrapT = THREE.ClampToEdgeWrapping;
   face.wrapS = THREE.ClampToEdgeWrapping;
   face.wrapT = THREE.ClampToEdgeWrapping;
+  gun.wrapS = THREE.ClampToEdgeWrapping;
+  gun.wrapT = THREE.ClampToEdgeWrapping;
 
-  textures = { brick, relief, cap, floor, fur, face, sky };
+  textures = { brick, relief, cap, floor, fur, face, gun, sky };
   return textures;
 }
 
@@ -1259,13 +1608,18 @@ function mountMaze(ctx) {
   let maze = buildMaze(course.levels[0], course.levels[0]);
   let walker = createWalker(maze);
   let courseDone = false;
-  let monster = null;
+  let monsters = [];
+  let packSize = MAZE_PACKS[0];
   let stalker = null;
   let dead = false;
   let health = PLAYER_HEALTH;
   let kills = 0;
   let shotTimer = 0;                       // counts down to the next shot
   let flash = 0;                           // muzzle flash, seconds remaining
+  let recoil = 0;                          // 1 the instant a shot goes off, easing to 0
+  let gunMesh = null;                       // the one you are holding
+  let killer = null;                        // whichever of them finished you
+  let deathTurn = 0;                        // how far through looking at it
   const sprint = { value: STAMINA_MAX, active: false };
   const drive = {                          // what stepWalker is actually given
     forward: false, back: false, left: false, right: false,
@@ -1283,8 +1637,7 @@ function mountMaze(ctx) {
   let torch = null;
   let exitPillar = null;
   let exitGlow = null;
-  let creature = null;
-  let creatureFur = null;   // shared material, flashed red when it is hit
+  let creatures = [];       // one group per monster, paired by index
   let pitch = 0;          // mouse look up/down, radians
   let mouseLook = false;  // only true while the pointer is locked
   let flatCanvas = null;  // the 2D fallback view, when WebGL is unavailable
@@ -1311,6 +1664,15 @@ function mountMaze(ctx) {
     MAZE_COURSES.map((c) => ({ id: c.id, label: `${c.label} (${c.levels[0]}–${c.levels[c.levels.length - 1]})` })),
     course.id, (id) => { course = courseById(id); restart(); },
     { ariaLabel: 'Maze size' });
+
+  const packRow = segmented(
+    MAZE_PACKS.map((n) => ({ id: String(n), label: `×${n}` })),
+    String(packSize), (id) => { packSize = Number(id); restart(); },
+    { ariaLabel: 'How many monsters' });
+
+  const packNote = document.createElement('p');
+  packNote.className = 'fieldnote';
+  packNote.textContent = 'How many are hunting you';
 
   const scoreRow = statRow([
     { key: 'level', label: 'Maze', value: '1', tone: 'x' },
@@ -1372,15 +1734,45 @@ function mountMaze(ctx) {
   const sight = document.createElement('div');
   sight.className = 'sight';
 
+  /* The death screen, inside the viewport rather than in the page chrome, so it
+     is still there when you die in fullscreen — which is where you will spend
+     most of your time. */
+  const gameOver = document.createElement('div');
+  gameOver.className = 'gameover';
+  gameOver.hidden = true;
+
+  const goneTitle = document.createElement('p');
+  goneTitle.className = 'gameover__title';
+  goneTitle.textContent = 'YOU DIED';
+
+  const goneLine = document.createElement('p');
+  goneLine.className = 'gameover__line';
+
+  const retryBtn = document.createElement('button');
+  retryBtn.type = 'button';
+  retryBtn.className = 'gameover__btn';
+  retryBtn.textContent = 'Retry';
+  retryBtn.addEventListener('click', (event) => {
+    event.stopPropagation();     // the view below fires the gun on mousedown
+    restart();
+  });
+
+  gameOver.append(goneTitle, goneLine, retryBtn);
+
+  /* The foe bar tracks whichever one you are pointing at, and the nearest one
+     when you are pointing at none — so shooting into a pack always shows you
+     the health of the thing you are actually hitting. */
   function refreshBars(closeness) {
     healthBar.set(health / PLAYER_HEALTH);
     sprintBar.set(sprint.value / STAMINA_MAX, !sprint.active && sprint.value < SPRINT_FLOOR);
-    const alive = monster && !monster.dead;
-    foeBar.set(alive ? monster.health / MONSTER_HEALTH : 0, !alive || closeness < 0.12);
+
+    const aimed = pickTarget(maze, walker, monsters);
+    const shown = aimed || nearestMonster(monsters, walker);
+    foeBar.set(shown ? shown.health / MONSTER_HEALTH : 0, !shown || (!aimed && closeness < 0.12));
+
     sight.classList.toggle('is-firing', flash > 0);
     sight.classList.toggle('is-ready', shotTimer <= 0);
-    sight.classList.toggle('is-on-target',
-      Boolean(monster) && !monster.dead && shotHits(maze, walker, monster));
+    sight.classList.toggle('is-on-target', Boolean(aimed));
   }
 
   // Shown in place of the 3D view when it cannot start.
@@ -1391,7 +1783,7 @@ function mountMaze(ctx) {
     return note;
   }
 
-  ctx.settings.append(courseRow.el);
+  ctx.settings.append(courseRow.el, packRow.el, packNote);
   ctx.score.append(scoreRow.el);
   const fireRow = document.createElement('div');
   fireRow.className = 'holdrow';
@@ -1572,80 +1964,95 @@ function mountMaze(ctx) {
     torch = null;
     scene.add(camera);
 
-    /* The creature.
+    /* The gun, parented to the camera so it rides with the view. depthTest off
+       and a high renderOrder: it is the nearest thing there is, and testing it
+       against the world only risks a wall clipping through your own hands. */
+    gunMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.4, 0.4),
+      new THREE.MeshBasicMaterial({
+        map: skin.gun, transparent: true, depthTest: false, depthWrite: false, fog: false,
+      }));
+    gunMesh.position.set(0.16, -0.155, -0.34);
+    gunMesh.renderOrder = 20;
+    camera.add(gunMesh);
 
-       A tall, shaggy blue thing: a wide head with round eyes and a mouth full
-       of teeth, a bow at the throat, arms long enough to trail past its knees,
+    /* The creatures — one per monster, paired by index.
+
+       Tall, shaggy blue things: a wide head with round eyes and a mouth full of
+       teeth, a bow at the throat, arms long enough to trail past their knees,
        and big orange hands and feet. Built from primitives with a fur texture
-       over them — the only fine detail is the face, and that is one textured
+       over them; the only fine detail is the face, and that is one textured
        plane rather than a mesh per tooth.
 
-       Kept under the 1.5-unit wall height so it never pokes over the top of
-       the maze and give itself away from three corridors off. */
-    creature = new THREE.Group();
+       Each gets its own fur material, so being shot flashes one of them red
+       rather than the whole pack. Kept under the 1.5-unit wall height so none
+       pokes over the top of the maze and gives itself away three corridors off. */
+    creatures = monsters.map(() => {
+      const group = new THREE.Group();
+      const fur = new THREE.MeshLambertMaterial({ map: skin.fur, color: 0xffffff });
+      const mitt = new THREE.MeshLambertMaterial({ color: 0xd98324 });
 
-    creatureFur = new THREE.MeshLambertMaterial({ map: skin.fur, color: 0xffffff });
-    const mitt = new THREE.MeshLambertMaterial({ color: 0xd98324 });
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.29, 18, 14), fur);
+      head.position.y = 1.14;
+      head.scale.set(1.12, 1, 0.92);
+      group.add(head);
 
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.29, 18, 14), creatureFur);
-    head.position.y = 1.14;
-    head.scale.set(1.12, 1, 0.92);
-    creature.add(head);
+      // Fur tufts, so the outline is not a clean ball.
+      for (const [tx, tz, lean] of [[-0.16, -0.02, -0.5], [0.02, 0.06, 0.1], [0.18, -0.04, 0.55]]) {
+        const tuft = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.22, 7), fur);
+        tuft.position.set(tx, 1.36, tz);
+        tuft.rotation.z = lean;
+        group.add(tuft);
+      }
 
-    // Fur tufts, so the outline is not a clean ball.
-    for (const [tx, tz, lean] of [[-0.16, -0.02, -0.5], [0.02, 0.06, 0.1], [0.18, -0.04, 0.55]]) {
-      const tuft = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.22, 7), creatureFur);
-      tuft.position.set(tx, 1.36, tz);
-      tuft.rotation.z = lean;
-      creature.add(tuft);
-    }
+      // The face: eyes, lips and teeth in one texture on a plane just proud of
+      // the head. alphaTest rather than blending, so there is nothing to sort.
+      const facePlane = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.52, 0.52),
+        new THREE.MeshLambertMaterial({
+          map: skin.face, transparent: true, alphaTest: 0.4, color: 0xffffff,
+        }));
+      facePlane.position.set(0, 1.13, 0.28);
+      group.add(facePlane);
 
-    // The face: eyes, lips and teeth in one texture on a plane just proud of
-    // the head. alphaTest rather than blending, so there is nothing to sort.
-    const facePlane = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.52, 0.52),
-      new THREE.MeshLambertMaterial({
-        map: skin.face, transparent: true, alphaTest: 0.4, color: 0xffffff,
-      }));
-    facePlane.position.set(0, 1.13, 0.28);
-    creature.add(facePlane);
+      const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.16, 0.46, 14), fur);
+      torso.position.y = 0.74;
+      group.add(torso);
 
-    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.16, 0.46, 14), creatureFur);
-    torso.position.y = 0.74;
-    creature.add(torso);
+      // The bow at its throat.
+      for (const side of [-1, 1]) {
+        const loop = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.1, 8), fur);
+        loop.position.set(side * 0.07, 0.95, 0.17);
+        loop.rotation.z = side * Math.PI * 0.5;
+        group.add(loop);
+      }
 
-    // The bow at its throat.
-    for (const side of [-1, 1]) {
-      const loop = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.1, 8), creatureFur);
-      loop.position.set(side * 0.07, 0.95, 0.17);
-      loop.rotation.z = side * Math.PI * 0.5;
-      creature.add(loop);
-    }
+      for (const side of [-1, 1]) {
+        // Arms, hanging almost to the floor and swung slightly out.
+        const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.045, 0.78, 8), fur);
+        arm.position.set(side * 0.25, 0.6, 0.02);
+        arm.rotation.z = side * 0.16;
+        group.add(arm);
 
-    for (const side of [-1, 1]) {
-      // Arms, hanging almost to the floor and swung slightly out.
-      const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.045, 0.78, 8), creatureFur);
-      arm.position.set(side * 0.25, 0.6, 0.02);
-      arm.rotation.z = side * 0.16;
-      creature.add(arm);
+        const hand = new THREE.Mesh(new THREE.SphereGeometry(0.075, 10, 8), mitt);
+        hand.position.set(side * 0.32, 0.22, 0.04);
+        hand.scale.set(1, 1.5, 0.8);
+        group.add(hand);
 
-      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.075, 10, 8), mitt);
-      hand.position.set(side * 0.32, 0.22, 0.04);
-      hand.scale.set(1, 1.5, 0.8);
-      creature.add(hand);
+        // Legs and feet.
+        const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.05, 0.56, 8), fur);
+        leg.position.set(side * 0.1, 0.29, 0);
+        group.add(leg);
 
-      // Legs and feet.
-      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.05, 0.56, 8), creatureFur);
-      leg.position.set(side * 0.1, 0.29, 0);
-      creature.add(leg);
+        const foot = new THREE.Mesh(new THREE.SphereGeometry(0.085, 10, 8), mitt);
+        foot.position.set(side * 0.1, 0.05, 0.06);
+        foot.scale.set(0.85, 0.55, 1.5);
+        group.add(foot);
+      }
 
-      const foot = new THREE.Mesh(new THREE.SphereGeometry(0.085, 10, 8), mitt);
-      foot.position.set(side * 0.1, 0.05, 0.06);
-      foot.scale.set(0.85, 0.55, 1.5);
-      creature.add(foot);
-    }
-
-    scene.add(creature);
+      scene.add(group);
+      return { group, fur };
+    });
   }
 
   // three.js does not free GPU buffers on its own; rebuilding a maze every
@@ -1659,8 +2066,7 @@ function mountMaze(ctx) {
       }
     });
     if (camera) camera.clear();
-    creature = null;
-    creatureFur = null;
+    creatures = [];
     coping = null;
     reveal = null;
   }
@@ -1727,7 +2133,7 @@ function mountMaze(ctx) {
     flatCanvas = document.createElement('canvas');
     flatCanvas.className = 'viewport__canvas';
     flat = flatCanvas.getContext('2d');
-    view.replaceChildren(flatCanvas, minimap, hud, sight);
+    view.replaceChildren(flatCanvas, minimap, hud, sight, gameOver);
     resize();
     ctx.setHint('W S walk · A D strafe · ← → turn · space sprint · click or F to shoot · ⛶ mouse look');
     ctx.setStatus(`${reason} Playing in 2D instead.`);
@@ -1742,6 +2148,8 @@ function mountMaze(ctx) {
     const dt = Math.min(0.05, (time - lastTime) / 1000 || 0);
     lastTime = time;
 
+    if (dead) return deathFrame(dt);
+
     const before = walker.escaped;
 
     /* Sprinting is gated on the bar rather than on the key: hold space with an
@@ -1752,17 +2160,26 @@ function mountMaze(ctx) {
     drive.sprint = stepSprint(sprint, input.sprint, moving, dt);
 
     stepWalker(maze, walker, drive, dt);
-    if (monster && !dead) stepMonster(maze, monster, walker, dt);
+    if (!dead) for (const m of monsters) stepMonster(maze, m, walker, dt);
     if (!courseDone && !dead) seconds += dt;
 
     shotTimer = Math.max(0, shotTimer - dt);
     flash = Math.max(0, flash - dt);
+    recoil = Math.max(0, recoil - dt * 5.5);   // kicks instantly, settles over ~180 ms
 
-    // Taking damage, and healing back only once it has lost you.
-    if (monster && !dead && !courseDone) {
-      const near = monsterCloseness(monster, walker);
-      if (monster.touching) {
-        health -= MONSTER_DAMAGE * dt;
+    const closest = nearestMonster(monsters, walker);
+    const near = closest ? monsterCloseness(closest, walker) : 0;
+
+    /* Taking damage, and healing back only once the pack has lost you.
+
+       Being surrounded hurts more than being cornered by one, but the total is
+       capped at two of them: five all landing blows at once would take you from
+       full to dead inside a second, which reads as a bug rather than as a
+       mistake you made. */
+    if (!dead && !courseDone) {
+      const mauling = monsters.reduce((n, m) => n + (m.touching ? 1 : 0), 0);
+      if (mauling) {
+        health -= MONSTER_DAMAGE * Math.min(2, mauling) * dt;
         if (Math.random() < dt * 2) audio.play('hurt');
         if (health <= 0) return killed();
       } else if (near < 0.2 && health < PLAYER_HEALTH) {
@@ -1770,7 +2187,7 @@ function mountMaze(ctx) {
       }
     }
 
-    refreshBars(monster ? monsterCloseness(monster, walker) : 0);
+    refreshBars(near);
 
     // A little head bob while walking, and a torch that flickers.
     const walking = (input.forward || input.back) && !walker.escaped;
@@ -1782,23 +2199,34 @@ function mountMaze(ctx) {
     if (exitGlow) exitGlow.intensity = 1.4 + Math.sin(seconds * 3) * 0.5;
     if (exitPillar) exitPillar.rotation.y += dt * 0.6;
 
-    // Keep the creature where the simulation says it is, always facing you,
-    // lurching a little as it walks.
-    if (creature) {
-      creature.visible = Boolean(monster) && !monster.dead && !dead;
-      if (monster) {
-        creature.position.set(monster.x, Math.abs(Math.sin(seconds * 6)) * 0.05, monster.y);
-        creature.rotation.y = Math.atan2(walker.x - monster.x, walker.y - monster.y);
-        creature.rotation.z = Math.sin(seconds * 3) * 0.05;
-        if (creatureFur) {
-          const hit = Math.min(1, monster.flinch * 4);
-          creatureFur.color.setRGB(1, 1 - hit * 0.55, 1 - hit * 0.6);
-        }
-      }
+    /* Each creature follows its own monster, always facing you and lurching a
+       little as it walks. The lurch is offset per index so a pack does not move
+       as one body. */
+    creatures.forEach(({ group, fur }, i) => {
+      const m = monsters[i];
+      group.visible = Boolean(m) && !m.dead && !dead;
+      if (!group.visible) return;
+
+      const step = seconds * 6 + i * 1.7;
+      group.position.set(m.x, Math.abs(Math.sin(step)) * 0.05, m.y);
+      group.rotation.y = Math.atan2(walker.x - m.x, walker.y - m.y);
+      group.rotation.z = Math.sin(step * 0.5) * 0.05;
+
+      const hit = Math.min(1, m.flinch * 4);
+      fur.color.setRGB(1, 1 - hit * 0.55, 1 - hit * 0.6);
+    });
+
+    if (gunMesh) {
+      // Sways with the walk, kicks down and back on every shot.
+      gunMesh.position.set(
+        0.16 + Math.sin(bob * 0.5) * 0.006 + recoil * 0.022,
+        -0.155 + Math.cos(bob) * 0.005 - recoil * 0.05,
+        -0.34 + recoil * 0.045);
+      gunMesh.rotation.z = -recoil * 0.24;
     }
 
     if (flat) {
-      drawRaycast(flat, maze, walker, pitch, flatCanvas.width, flatCanvas.height, monster);
+      drawRaycast(flat, maze, walker, pitch, flatCanvas.width, flatCanvas.height, monsters, recoil);
     } else {
       camera.position.set(walker.x, eye, walker.y);
       camera.rotation.set(pitch, -walker.yaw - Math.PI / 2, 0, 'YXZ');
@@ -1808,12 +2236,12 @@ function mountMaze(ctx) {
     mapAge += dt;
     if (mapAge >= MINIMAP_PERIOD) {
       mapAge = 0;
-      drawMinimap(map2d, maze, walker, MINIMAP_PX, monster);
+      drawMinimap(map2d, maze, walker, MINIMAP_PX, monsters);
     }
     scoreRow.set('time', clock(seconds));
 
     // Proximity drone, and a footstep every so often as you cover ground.
-    if (stalker) stalker.set(monster && !monster.dead && !dead ? monsterCloseness(monster, walker) : 0);
+    if (stalker) stalker.set(dead ? 0 : near);
     footfall += Math.hypot(walker.x - (lastFoot.x ?? walker.x), walker.y - (lastFoot.y ?? walker.y));
     lastFoot.x = walker.x;
     lastFoot.y = walker.y;
@@ -1825,47 +2253,113 @@ function mountMaze(ctx) {
     if (walker.escaped && !before) escape();
   }
 
+  /* The last thing you see is the thing that did it.
+
+     The loop keeps running after you die rather than stopping dead, so the view
+     can swing round onto your killer over about half a second. Nothing in the
+     world moves while it does — the pack is frozen where it stood. */
+  function deathFrame(dt) {
+    deathTurn = Math.min(1, deathTurn + dt * 2.2);
+
+    if (killer) {
+      const dx = killer.x - walker.x;
+      const dy = killer.y - walker.y;
+      const gap = Math.max(0.35, Math.hypot(dx, dy));
+
+      // Shortest way round, or a turn of 350 degrees the wrong way.
+      const wanted = Math.atan2(dy, dx);
+      const swing = Math.atan2(Math.sin(wanted - walker.yaw), Math.cos(wanted - walker.yaw));
+      walker.yaw += swing * Math.min(1, dt * 6);
+
+      // Look up into its face rather than at its knees.
+      const up = Math.atan2(1.05 - EYE_HEIGHT, gap);
+      pitch += (Math.min(MAX_PITCH, up) - pitch) * Math.min(1, dt * 6);
+    }
+
+    if (creatures.length) {
+      creatures.forEach(({ group }, i) => {
+        const m = monsters[i];
+        group.visible = Boolean(m) && !m.dead;
+        if (group.visible) {
+          group.position.set(m.x, 0, m.y);
+          group.rotation.y = Math.atan2(walker.x - m.x, walker.y - m.y);
+        }
+      });
+    }
+
+    const sink = EYE_HEIGHT - deathTurn * 0.22;   // knees giving way
+    if (flat) {
+      drawRaycast(flat, maze, walker, pitch, flatCanvas.width, flatCanvas.height, monsters, 0);
+    } else if (renderer) {
+      if (gunMesh) gunMesh.visible = false;       // you have dropped it
+      camera.position.set(walker.x, sink, walker.y);
+      camera.rotation.set(pitch, -walker.yaw - Math.PI / 2, 0, 'YXZ');
+      renderer.render(scene, camera);
+    }
+
+    // Once it has finished turning there is nothing left to animate.
+    if (deathTurn >= 1) stop();
+  }
+
   // Out of health. The run ends wherever you were in it.
   function killed() {
     dead = true;
     health = 0;
+    deathTurn = 0;
+    // Whichever of them actually had hold of you, else the nearest.
+    killer = monsters.find((m) => m.touching) || nearestMonster(monsters, walker);
     refreshBars(1);
-    stop();
+    if (stalker) { stalker.stop(); stalker = null; }
     audio.play('caught');
-    ctx.setStatus(
-      `It got you on maze ${level + 1} of ${course.levels.length} · ${clock(seconds)}` +
-      `${kills ? ` · ${kills} put down` : ''} — press New Run`, false);
+
+    /* Release the pointer, or the Retry button cannot be clicked: under pointer
+       lock there is no cursor to click it with. Fullscreen itself is left
+       alone — you should not be thrown out of the game to restart. */
+    if (document.exitPointerLock && document.pointerLockElement === view) {
+      document.exitPointerLock();
+    }
+
+    goneLine.textContent =
+      `Maze ${level + 1} of ${course.levels.length} · ${clock(seconds)}` +
+      `${kills ? ` · ${kills} put down` : ''}`;
+    gameOver.hidden = false;
+    retryBtn.focus();
+
+    ctx.setStatus(`It got you on maze ${level + 1} of ${course.levels.length} · ${clock(seconds)}`, false);
   }
 
   /* Firing. Hitscan, so the shot lands or misses the instant you pull the
      trigger; the rate of fire is what stops you emptying a hundred points into
      it in half a second. */
   function fire() {
-    if (dead || courseDone || !monster || shotTimer > 0) return;
+    if (dead || courseDone || shotTimer > 0) return;
     shotTimer = SHOT_COOLDOWN;
     flash = 0.07;
+    recoil = 1;
     audio.play('shot');
 
-    if (!shotHits(maze, walker, monster)) return;
+    // Whichever of them is nearest along the line you are pointing.
+    const target = pickTarget(maze, walker, monsters);
+    if (!target) return;
 
     audio.play('impact');
-    monster.health -= SHOT_DAMAGE;
-    monster.flinch = 0.22;
+    target.health -= SHOT_DAMAGE;
+    target.flinch = 0.22;
 
-    if (monster.health > 0) {
-      refreshBars(monsterCloseness(monster, walker));
+    if (target.health > 0) {
+      refreshBars(monsterCloseness(target, walker));
       return;
     }
 
     // Down, and back on its feet somewhere else entirely.
-    monster.dead = true;
-    monster.touching = false;
     kills += 1;
     scoreRow.set('kills', kills);
     audio.play('slain');
-    monster = createMonster(maze, walker, Math.random, RESPAWN_MIN);
+    respawnMonster(maze, walker, target);
     refreshBars(0);
-    ctx.setStatus(`Down — but it is already back on its feet somewhere. ${kills} so far.`);
+    ctx.setStatus(packSize > 1
+      ? `One down — and already back up somewhere. ${kills} so far, ${packSize} still out there.`
+      : `Down — but it is already back on its feet somewhere. ${kills} so far.`);
   }
 
   // Escaping one maze drops you straight into the next. The clock keeps
@@ -1899,7 +2393,8 @@ function mountMaze(ctx) {
     const cells = course.levels[level];
     maze = buildMaze(cells, cells);
     walker = createWalker(maze);
-    monster = createMonster(maze, walker);
+    monsters = Array.from({ length: packSize },
+      () => createMonster(maze, walker));
     health = PLAYER_HEALTH;
     sprint.value = STAMINA_MAX;
     refreshBars(0);
@@ -1936,6 +2431,11 @@ function mountMaze(ctx) {
     seconds = 0;
     courseDone = false;
     dead = false;
+    killer = null;
+    deathTurn = 0;
+    recoil = 0;
+    if (gunMesh) gunMesh.visible = true;
+    gameOver.hidden = true;
     health = PLAYER_HEALTH;
     kills = 0;
     sprint.value = STAMINA_MAX;
@@ -1949,7 +2449,7 @@ function mountMaze(ctx) {
     loadLevel();
 
     if (!renderer && !flat) return;     // still loading
-    if (renderer) view.replaceChildren(renderer.domElement, minimap, hud, sight);
+    if (renderer) view.replaceChildren(renderer.domElement, minimap, hud, sight, gameOver);
     resize();
     ctx.setStatus(`${whereAmI()} — find the way out`);
     start();
@@ -1967,6 +2467,11 @@ function mountMaze(ctx) {
   };
 
   function onKeyDown(event) {
+    if (dead && (event.key === 'Enter' || event.key === 'r' || event.key === 'R')) {
+      event.preventDefault();
+      restart();
+      return;
+    }
     if (event.key === 'f' || event.key === 'F') {
       event.preventDefault();
       fire();
@@ -2094,9 +2599,10 @@ if (typeof module !== 'undefined') {
   module.exports = {
     buildMaze, solveMaze, isWall, createWalker, stepWalker, moveWalker,
     MAZE_COURSES, courseById, WALKER_RADIUS, WALK_SPEED, TURN_SPEED, SPRINT_MULTIPLIER,
-    drawRaycast, drawMinimap, cellKey, keyX, keyY, MAZE_FOV, WALL_HEIGHT, EYE_HEIGHT,
-    makeTextures, drawCreature, createMonster, stepMonster, monsterCloseness,
-    shotHits, clearLine, stepSprint,
+    drawRaycast, drawMinimap, drawGun, cellKey, keyX, keyY, MAZE_FOV, WALL_HEIGHT, EYE_HEIGHT,
+    makeTextures, drawCreature, createMonster, respawnMonster, spawnSpot,
+    stepMonster, monsterCloseness, pickTarget, nearestMonster,
+    shotHits, clearLine, stepSprint, MAZE_PACKS,
     MONSTER_SPEED, MONSTER_MIN_START, MONSTER_REACH, MONSTER_DAMAGE, RESPAWN_MIN,
     PLAYER_HEALTH, MONSTER_HEALTH, SHOT_DAMAGE, SHOT_RANGE,
     STAMINA_MAX, SPRINT_DRAIN, STAMINA_REGEN, SPRINT_FLOOR,

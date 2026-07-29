@@ -84,9 +84,21 @@ grid with a shortest route of around 940 steps.
 
 Brick walls, tiled floors and the sky are painted onto 2D canvases at load
 time and used as textures, so there are still no image files to download. The
-maze is open to a dusk sky rather than roofed — the sun just going down, cloud
-banks lit warm from below, the first stars out — and lit by that sky rather
-than by a lamp on the camera, so the walls stay matte instead of glowing.
+maze is open to a dusk sky rather than roofed, and lit by that sky rather than
+by a lamp on the camera, so the walls stay matte instead of glowing.
+
+The sky takes more gradient stops than it strictly needs, because real twilight
+is not a linear ramp: it holds its blue, then turns quickly through green-grey
+into the warm band just above the horizon, and three stops show their seams.
+Cloud banks are stacked from four passes of decreasing size and rising opacity
+— soft edges are the whole point, since one flat ellipse reads as a lozenge no
+matter how it is shaped. The sun is a tight core inside a wide bloom, there is
+a brighter haze band on the horizon where the air is thickest, and the first
+stars are out overhead with a handful bright enough to show a cross of light.
+
+The floor is poured concrete rather than vinyl: each slab a slightly different
+cast, blotched at a larger scale than its grain, with hairline cracks wandering
+across some of them and damp patches that span slabs and ignore the grid.
 
 Every wall is capped with a coping course — a little wider than the wall, a
 little paler, with a dark reveal in the shade of its overhang. It is one more
@@ -95,8 +107,15 @@ extra draw call, and it is what turns a grid of cubes into built architecture.
 The floor carries a broad, weak highlight: sealed concrete rather than matte
 grit, which gives it a direction under the sky.
 
-The brickwork is a running bond in two greys, every brick nudged a few points
-off its neighbours, bevelled light along the top and shadowed along the
+The brickwork is weathered rather than tiled. A running bond in two greys, with
+every brick shifted in value *and* in hue — real masonry varies warm to cool,
+not just light to dark, and a wall of pure greys is what reads as
+computer-generated. On top of that: the occasional much darker aged brick,
+blotching across each face, chipped corners showing the mortar behind, an
+uneven mortar bed, and grime streaking down from the horizontal joints, which
+is most of what separates weathered stone from a clean repeating pattern.
+
+Each brick is bevelled light along the top and shadowed along the
 bottom. A **normal map generated from the same layout** turns all of that into
 real relief in the 3D view — every joint and bevel catches the light instead of
 being a photograph of brick on a flat panel, at the cost of one texture rather
@@ -174,7 +193,13 @@ almost on top of you, so the sound is your warning, not the map.
 
 Both of you have a hundred points.
 
-- **You have a gun.** Click, press **F**, or hit the trigger button. It is
+- **A pack of one to five.** Pick how many are hunting you. They share the maze
+  but nothing else: each has its own hundred points and works out its own route
+  to you. Being surrounded hurts more than being cornered by one, though the
+  damage is capped at two of them at once — five landing blows together would
+  take you from full to dead inside a second, which reads as a bug rather than
+  as a mistake you made.
+- **You have a gun**, and you can see it. Click, press **F**, or hit the trigger button. It is
   hitscan — the round lands or misses the instant you fire, so what matters is
   whether the creature is inside the cone you are pointing down and whether a
   wall is in the way. That cone widens as it gets closer, because that is how
@@ -182,9 +207,13 @@ Both of you have a hundred points.
   that looks like it should connect does. Twenty-five points a hit, four hits
   to a kill, and a third of a second between shots so you cannot empty a
   magazine into it in one go.
+  A shot picks whichever of them is nearest along the line you are pointing, so
+  firing into a crowd hits the one in front.
 - **The crosshair does the aiming for you.** It closes up while the shot
-  reloads and turns red the moment the creature is genuinely in the line of
+  reloads and turns red the moment a creature is genuinely in the line of
   fire, so you never need a number on screen to know whether you are on target.
+  The foe bar tracks whatever you are pointing at, and the nearest one when you
+  are pointing at none.
 - **It hurts you by degrees**, not all at once: twenty-four points a second
   while it is within reach, so a little over four seconds of contact finishes
   you. Break away and you heal slowly — but only once it has properly lost you,
@@ -201,6 +230,21 @@ Both of you have a hundred points.
   for ground covered, not for holding a key down.
 
 Health and stamina come back in full at the start of each maze in the run.
+
+**When one of them finishes you**, the view swings round onto whichever one
+actually had hold of you and your knees give way, then **YOU DIED** comes up
+over the top with a **Retry** button under it — or press Enter. The loop keeps
+running through that half-second rather than stopping dead, which is what lets
+the camera turn; nothing in the world moves while it does. Dying under mouse
+look releases the pointer, because there is no cursor to click Retry with
+otherwise, but it leaves you in fullscreen: you should not be thrown out of the
+game to restart.
+
+The gun sits in the bottom-right, sways with your stride and kicks down and
+back on every shot. It is painted onto one transparent canvas and used by both
+renderers — a plane pinned to the camera in 3D, a blit into the corner in the
+2D fallback — the same trick as the creature's face, so there is one drawing of
+it rather than two that drift apart.
 
 ### What it looks like
 
