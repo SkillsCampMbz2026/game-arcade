@@ -71,6 +71,8 @@ function swatches(options, activeId, onSelect, { ariaLabel } = {}) {
     btn.className = 'swatch';
     btn.dataset.id = option.id;
     btn.style.background = option.colour;
+    // Also as `color`, so CSS can glow the active swatch in its own paint.
+    btn.style.color = option.colour;
     btn.title = option.label;
     btn.setAttribute('aria-label', option.label);
     btn.addEventListener('click', () => {

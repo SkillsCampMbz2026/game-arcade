@@ -360,12 +360,16 @@ const RACE_MAPS = [
     palette: {
       skyTop: '#0c4a6e', skyMid: '#0ea5e9', skyLow: '#7dd3fc',
       sun: '#fef9c3', sunGlow: 'rgba(254, 249, 195, 0.35)',
-      ridgeFar: '#075985', ridgeNear: '#0369a1',
-      ground: '#0f766e',
-      grassLight: '#16a34a', grassDark: '#15803d',
+      cloud: 'rgba(240, 249, 255, 0.3)',
+      ridgeFar: '#0b5f8e', ridgeFarLit: '#1b7bb0',
+      ridgeNear: '#0369a1', ridgeNearLit: '#0e86c4',
+      ground: '#14867c',
+      grassLight: '#1aa44e', grassDark: '#189146',
       rumbleLight: '#f8fafc', rumbleDark: '#dc2626',
-      roadLight: '#57534e', roadDark: '#44403c',
-      lane: '#f8fafc', fog: '#7dd3fc',
+      roadLight: '#5a5651', roadDark: '#4c4842',
+      wear: 'rgba(28, 25, 23, 0.24)',
+      hazeStrong: 'rgba(186, 230, 253, 0.85)', hazeSoft: 'rgba(186, 230, 253, 0.4)',
+      lane: '#f8fafc', fog: '#bae6fd',
     },
   },
   {
@@ -383,12 +387,16 @@ const RACE_MAPS = [
     palette: {
       skyTop: '#7c2d12', skyMid: '#ea580c', skyLow: '#fbbf24',
       sun: '#fff7ed', sunGlow: 'rgba(255, 237, 213, 0.4)',
-      ridgeFar: '#7c2d12', ridgeNear: '#9a3412',
-      ground: '#b45309',
-      grassLight: '#d97706', grassDark: '#b45309',
+      cloud: 'rgba(255, 237, 213, 0.22)',
+      ridgeFar: '#8a3517', ridgeFarLit: '#a8451f',
+      ridgeNear: '#9a3412', ridgeNearLit: '#c2551d',
+      ground: '#c2620b',
+      grassLight: '#d9820a', grassDark: '#c67208',
       rumbleLight: '#fef3c7', rumbleDark: '#7f1d1d',
-      roadLight: '#57534e', roadDark: '#44403c',
-      lane: '#fef3c7', fog: '#fbbf24',
+      roadLight: '#5a5651', roadDark: '#4c4842',
+      wear: 'rgba(41, 37, 36, 0.22)',
+      hazeStrong: 'rgba(253, 230, 138, 0.8)', hazeSoft: 'rgba(251, 191, 36, 0.35)',
+      lane: '#fef3c7', fog: '#fde68a',
     },
   },
   {
@@ -406,12 +414,16 @@ const RACE_MAPS = [
     palette: {
       skyTop: '#020617', skyMid: '#1e1b4b', skyLow: '#4c1d95',
       sun: '#e2e8f0', sunGlow: 'rgba(226, 232, 240, 0.18)',
-      ridgeFar: '#0f172a', ridgeNear: '#1e1b4b',
-      ground: '#111827',
-      grassLight: '#1f2937', grassDark: '#111827',
+      cloud: 'rgba(76, 29, 149, 0.35)',
+      ridgeFar: '#131c31', ridgeFarLit: '#24304f',
+      ridgeNear: '#1e1b4b', ridgeNearLit: '#392f7a',
+      ground: '#151d2e',
+      grassLight: '#232f42', grassDark: '#1c2637',
       rumbleLight: '#f8fafc', rumbleDark: '#7c3aed',
-      roadLight: '#3f3f46', roadDark: '#27272a',
-      lane: '#fde68a', fog: '#4c1d95',
+      roadLight: '#44444c', roadDark: '#3a3a41',
+      wear: 'rgba(9, 9, 11, 0.3)',
+      hazeStrong: 'rgba(88, 45, 160, 0.7)', hazeSoft: 'rgba(76, 29, 149, 0.35)',
+      lane: '#fde68a', fog: '#6d3fbf',
     },
   },
 ];
@@ -966,24 +978,82 @@ function mountRacing(ctx) {
     g.arc(sunX, sunY, 17, 0, Math.PI * 2);
     g.fill();
 
-    ridge(palette.ridgeFar, horizon + 2, 46, 0.017, shift * 0.35);
-    ridge(palette.ridgeNear, horizon + 4, 30, 0.031, shift * 0.6);
+    clouds(horizon, shift);
+
+    /* Three ridges rather than two, the furthest palest, each one lit along
+       its own skyline. Depth in a backdrop comes from things getting hazier
+       with distance, not from more detail. */
+    ridge(palette.ridgeFar, palette.ridgeFarLit, horizon + 2, 58, 0.011, shift * 0.22);
+    ridge(palette.ridgeFar, palette.ridgeFarLit, horizon + 3, 42, 0.017, shift * 0.4);
+    ridge(palette.ridgeNear, palette.ridgeNearLit, horizon + 5, 28, 0.031, shift * 0.68);
 
     g.fillStyle = palette.ground;
     g.fillRect(0, horizon, RACE_W, RACE_H - horizon);
 
-    function ridge(colour, base, height, frequency, offset) {
+    /* Haze sitting on the horizon. The road and grass fade into the sky over
+       the last stretch, which is what stops the far end of the track ending
+       in a hard green line against the hills. */
+    const haze = g.createLinearGradient(0, horizon - 34, 0, horizon + 58);
+    haze.addColorStop(0, 'rgba(0, 0, 0, 0)');
+    haze.addColorStop(0.34, palette.hazeStrong);
+    haze.addColorStop(0.58, palette.hazeSoft);
+    haze.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    g.fillStyle = haze;
+    g.fillRect(0, horizon - 34, RACE_W, 92);
+
+    function ridge(colour, lit, base, height, frequency, offset) {
+      const top = [];
+      for (let i = -100; i <= RACE_W + 100; i += 12) {
+        const h = height * (0.55 + 0.45 * Math.sin((i + offset) * frequency))
+          + height * 0.28 * Math.sin((i + offset) * frequency * 2.7);
+        top.push([i, base - h]);
+      }
+
       g.fillStyle = colour;
       g.beginPath();
       g.moveTo(-100, base);
-      for (let i = -100; i <= RACE_W + 100; i += 16) {
-        const h = height * (0.55 + 0.45 * Math.sin((i + offset) * frequency))
-          + height * 0.28 * Math.sin((i + offset) * frequency * 2.7);
-        g.lineTo(i, base - h);
-      }
+      for (const [x, y] of top) g.lineTo(x, y);
       g.lineTo(RACE_W + 100, base);
       g.closePath();
       g.fill();
+
+      // A lit crest: the same skyline, dropped a few pixels and filled back.
+      g.fillStyle = lit;
+      g.beginPath();
+      g.moveTo(top[0][0], top[0][1] + 5);
+      for (const [x, y] of top) g.lineTo(x, y);
+      for (let i = top.length - 1; i >= 0; i--) g.lineTo(top[i][0], top[i][1] + 5);
+      g.closePath();
+      g.fill();
+    }
+
+    // Slow, soft cloud bands. Ellipses rather than sprites: they cost nothing
+    // and there is no texture to load.
+    function clouds(base, drift) {
+      for (let i = 0; i < 7; i++) {
+        const seed = i * 137.5;
+        const y = base - 70 - (i % 3) * 34 - (i % 2) * 12;
+        const x = (((seed * 6.4 + drift * (0.25 + (i % 3) * 0.12)) % (RACE_W + 320)) + RACE_W + 320)
+          % (RACE_W + 320) - 160;
+        const w = 60 + (i % 4) * 26;
+        /* Built from overlapping ellipses, each drawn as one path so the
+           overlaps do not double-composite into hard internal edges. Two
+           passes — a wide soft base and a smaller brighter cap — read as a
+           cloud with a lit top rather than as a row of blobs. */
+        for (const [pass, squash, alpha] of [[1, 1, 0.55], [0.62, 0.72, 1]]) {
+          g.fillStyle = palette.cloud;
+          g.globalAlpha = alpha;
+          g.beginPath();
+          for (const [ox, oy, rx, ry] of [[0, 0, w, w * 0.2], [-w * 0.42, w * 0.09, w * 0.5, w * 0.15],
+            [w * 0.36, w * 0.07, w * 0.56, w * 0.17], [-w * 0.12, -w * 0.06, w * 0.42, w * 0.16]]) {
+            g.moveTo(x + ox * pass + rx * pass, y + oy - w * 0.04 * (1 - pass));
+            g.ellipse(x + ox * pass, y + oy - w * 0.04 * (1 - pass),
+              rx * pass, ry * squash, 0, 0, Math.PI * 2);
+          }
+          g.fill();
+          g.globalAlpha = 1;
+        }
+      }
     }
   }
 
@@ -1011,6 +1081,16 @@ function mountRacing(ctx) {
     trapezoid(p1.x, p1.y, p1.w + rumble1, p2.x, p2.y, p2.w + rumble2,
       dark ? palette.rumbleDark : palette.rumbleLight);
     trapezoid(p1.x, p1.y, p1.w, p2.x, p2.y, p2.w, dark ? palette.roadDark : palette.roadLight);
+
+    /* Two darker bands where the racing line has polished the tarmac. They
+       run with the road, so they curve and shrink with it and give a plain
+       grey surface something to read the corners by. */
+    if (p1.w > 12) {
+      for (const lane of [-0.45, 0.45]) {
+        trapezoid(p1.x + p1.w * lane, p1.y, p1.w * 0.2,
+          p2.x + p2.w * lane, p2.y, p2.w * 0.2, palette.wear);
+      }
+    }
 
     if (segment.finish) {
       drawCheckers(segment);

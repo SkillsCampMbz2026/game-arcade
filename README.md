@@ -48,6 +48,12 @@ far-to-near — which is how arcade racers drew 3D roads before GPUs.
 - Slipstreaming, speed-squared cornering load, hills that hide the road behind
   them, crash barriers and sign gantries, a world that banks through corners,
   and collision swept across every segment a frame crosses.
+- **Aerial perspective.** Three parallax ridge lines, each paler than the one
+  in front and lit along its own skyline; drifting cloud banks; and a haze
+  band sitting on the horizon so the road and grass dissolve into the sky
+  instead of ending in a hard line against the hills. The tarmac carries two
+  polished bands where the racing line has worn it, which curve and narrow
+  with the road and give a plain grey surface something to read corners by.
 
 Controls: **W / ↑** throttle, **A D** or **← →** steer, **S / ↓** brake,
 **Q E** to drift, **Space** to pause.
@@ -78,9 +84,17 @@ grid with a shortest route of around 940 steps.
 
 Brick walls, tiled floors and the sky are painted onto 2D canvases at load
 time and used as textures, so there are still no image files to download. The
-maze is open to a dusk sky rather than roofed — the sun just going down, the
-first stars out — and lit by that sky rather than by a lamp on the camera, so
-the walls stay matte instead of glowing.
+maze is open to a dusk sky rather than roofed — the sun just going down, cloud
+banks lit warm from below, the first stars out — and lit by that sky rather
+than by a lamp on the camera, so the walls stay matte instead of glowing.
+
+The brickwork is a running bond in two greys, every brick nudged a few points
+off its neighbours, bevelled light along the top and shadowed along the
+bottom. The wall texture maps once over the full height rather than tiling, so
+a contact shadow can be baked into the bottom of it — the darkening where a
+wall meets the floor is most of what stops a corridor reading as flat
+cardboard, and being painted in it costs nothing at runtime: no extra lights,
+no shadow maps.
 
 Controls: **W S** walk, **A D** strafe, **arrow keys** turn, **space** sprint,
 and the mouse once you are fullscreen. You will want the sprint.
@@ -110,6 +124,27 @@ You hear it before you see it. A low drone rides under everything, getting
 louder, brighter and faster as it closes — a slow pulse at a distance, a fast
 one when it is round the corner. It shows on the minimap only once it is
 almost on top of you, so the sound is your warning, not the map.
+
+## Looks
+
+Everything on screen is drawn by the page — there is not one image file in the
+repository. Where that shows:
+
+- **Snake** is one continuous tapering tube, not a row of tiles: a disc at
+  every segment plus a bridge to the next, laid down as a single path and
+  filled once per pass. Filling it segment by segment double-composites the
+  overlaps, which beads a bright blob onto every joint. Three passes — dark
+  rim, shaded body, a sheen along the top — make it round. It sits on a
+  checkerboard lawn under a vignette, with a lit edge that goes dashed when
+  the walls wrap.
+- **Connect Four** discs are lit from above-left over a darker rim, dropped
+  into holes punched through a frame with a real inner shadow.
+- **Cards** show a woven lattice back in the game's accent, so a face-down
+  grid reads as a deck rather than as empty tiles.
+- **One depth language.** A single hairline, lift shadow and inset shadow are
+  defined once as custom properties and reused by every panel, tile, chip and
+  button, so nothing sits at an arbitrary height. Each game's accent colour
+  drives its own title, halo and button gradients from a single variable.
 
 ## Fullscreen
 
