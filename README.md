@@ -15,7 +15,7 @@ vendored in `vendor/` and loaded on demand by the maze.
 | **Matching Cards** | Four board sizes, solo against the clock or two players |
 | **Snake** | Three speeds and sizes, solid walls or wrap-around, saved best scores |
 | **Car Racing** | 3D perspective racer — 8 cars, 6 laps, 3 maps, pick your car and paint |
-| **Escape the Maze** | First-person 3D maze runs — pick Small, Medium or Large, finish three, and outrun the thing chasing you |
+| **Escape the Maze** | First-person 3D maze runs — pick Small, Medium or Large, finish three, and fight off the thing chasing you |
 
 ## The CPU opponents
 
@@ -88,9 +88,21 @@ maze is open to a dusk sky rather than roofed — the sun just going down, cloud
 banks lit warm from below, the first stars out — and lit by that sky rather
 than by a lamp on the camera, so the walls stay matte instead of glowing.
 
+Every wall is capped with a coping course — a little wider than the wall, a
+little paler, with a dark reveal in the shade of its overhang. It is one more
+instanced mesh with a single material, so the whole maze's worth of it is one
+extra draw call, and it is what turns a grid of cubes into built architecture.
+The floor carries a broad, weak highlight: sealed concrete rather than matte
+grit, which gives it a direction under the sky.
+
 The brickwork is a running bond in two greys, every brick nudged a few points
 off its neighbours, bevelled light along the top and shadowed along the
-bottom. The wall texture maps once over the full height rather than tiling, so
+bottom. A **normal map generated from the same layout** turns all of that into
+real relief in the 3D view — every joint and bevel catches the light instead of
+being a photograph of brick on a flat panel, at the cost of one texture rather
+than any extra geometry.
+
+The wall texture maps once over the full height rather than tiling, so
 a contact shadow can be baked into the bottom of it — the darkening where a
 wall meets the floor is most of what stops a corridor reading as flat
 cardboard, and being painted in it costs nothing at runtime: no extra lights,
@@ -131,7 +143,7 @@ renderer's own time from 10 ms to 0.4 ms. The test suite holds a budget on the
 call count, so a future flourish that undoes this fails loudly.
 
 Controls: **W S** walk, **A D** strafe, **arrow keys** turn, **space** sprint,
-and the mouse once you are fullscreen. You will want the sprint.
+**click** or **F** to shoot, and the mouse once you are fullscreen.
 
 The minimap shows three things and nothing else: where you are, where you have
 been, and where the exit is. It never draws walls you have not walked past and
@@ -148,16 +160,60 @@ third of a second it runs the same breadth-first search the solver uses, from
 its square to yours, and walks the first step of that route. There is no line
 of sight to break and nowhere to hide.
 
-The only defence is that it is slower than you: it moves at 2.45 squares a
-second against your 3.1 walking and 5.9 sprinting. Keep moving and you stay
-ahead; stop to work out where you are and it closes. It spawns at least eight
-squares away and never near the exit, so you are never made to walk into it to
-finish. Let it reach you and the run ends where you stand.
+It moves at 2.05 squares a second against your 3.1 walking and 5.9 sprinting,
+so you can outpace it — but only while the sprint bar lasts. It spawns at least
+eight squares away and never near the exit, so you are never made to walk into
+it to finish.
 
 You hear it before you see it. A low drone rides under everything, getting
 louder, brighter and faster as it closes — a slow pulse at a distance, a fast
 one when it is round the corner. It shows on the minimap only once it is
 almost on top of you, so the sound is your warning, not the map.
+
+### The fight
+
+Both of you have a hundred points.
+
+- **You have a gun.** Click, press **F**, or hit the trigger button. It is
+  hitscan — the round lands or misses the instant you fire, so what matters is
+  whether the creature is inside the cone you are pointing down and whether a
+  wall is in the way. That cone widens as it gets closer, because that is how
+  much of your view it actually fills, plus a sliver of forgiveness so a shot
+  that looks like it should connect does. Twenty-five points a hit, four hits
+  to a kill, and a third of a second between shots so you cannot empty a
+  magazine into it in one go.
+- **The crosshair does the aiming for you.** It closes up while the shot
+  reloads and turns red the moment the creature is genuinely in the line of
+  fire, so you never need a number on screen to know whether you are on target.
+- **It hurts you by degrees**, not all at once: twenty-four points a second
+  while it is within reach, so a little over four seconds of contact finishes
+  you. Break away and you heal slowly — but only once it has properly lost you,
+  more than eight squares off.
+- **Kill it and it comes straight back**, at least fourteen squares away with
+  its health restored. It never returns within arm's reach, and in a maze too
+  small to honour that distance it takes the furthest square there is rather
+  than giving up and landing on top of you. The scoreboard counts how many you
+  have put down.
+- **The sprint bar** is what makes the chase a decision. A full bar buys just
+  under four seconds at a run and refills in about seven at a walk, and it will
+  not restart until there is a worthwhile amount back — so an almost-empty bar
+  cannot flicker you in and out of a sprint. Standing still refills it: you pay
+  for ground covered, not for holding a key down.
+
+Health and stamina come back in full at the start of each maze in the run.
+
+### What it looks like
+
+Tall and shaggy and blue, with a wide grin full of teeth, round staring eyes,
+arms long enough to trail past its knees and big orange hands and feet.
+
+It is built from primitives with a fur texture over them. The only part with
+any fine detail is the face, and that is a single texture with the eyes, lips
+and two rows of teeth painted into it — mapped onto a plane on the front of the
+head in 3D, and blitted onto the silhouette in the 2D fallback, so the two
+renderers cannot drift apart. A texture is also far cheaper than a mesh per
+tooth. It takes a hit by flashing red, which is one colour change on a shared
+material rather than anything per-mesh.
 
 ## Looks
 

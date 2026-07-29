@@ -11,6 +11,7 @@
 
 const THREE_SRC = 'vendor/three.min.js';
 const BRICK_TEX = 256;   // texture edge, in pixels
+const FACE_TEX = 256;    // the creature's face, likewise
 
 /* Pick a size and you get a run of three mazes at that scale, each a little
    bigger than the last. Escaping one drops you straight into the next; the
@@ -250,29 +251,53 @@ function stepWalker(maze, walker, input, dt) {
 
    Pure, like the walker: given a maze and a player it returns its new state,
    which is what makes the chase testable without a browser. */
-const MONSTER_SPEED = 2.45;      // cells per second; player walks 3.1
+const MONSTER_SPEED = 2.05;      // cells per second; player walks 3.1
 const MONSTER_REPATH = 0.35;     // seconds between route recalculations
-const CATCH_RADIUS = 0.45;       // cells
+const MONSTER_REACH = 0.7;       // cells; how close before it can hit you
 const MONSTER_MIN_START = 8;     // squares of head start, at least
+const RESPAWN_MIN = 14;          // and further still when it comes back
+
+/* A fight, rather than one fatal touch. Both sides have a hundred points: it
+   takes four hits from you and about four seconds of its own to finish you. */
+const PLAYER_HEALTH = 100;
+const MONSTER_HEALTH = 100;
+const MONSTER_DAMAGE = 24;       // per second of contact
+const HEALTH_REGEN = 3;          // per second, only once it is far off
+const SHOT_DAMAGE = 25;          // four shots to a kill
+const SHOT_COOLDOWN = 0.38;      // seconds between shots
+const SHOT_RANGE = 16;           // cells
+const AIM_ASSIST = 0.055;        // radians of forgiveness either side
+
+/* Sprinting now costs something. A full bar is a little under four seconds at
+   a run, and refills in about seven at a walk. */
+const STAMINA_MAX = 100;
+const SPRINT_DRAIN = 26;         // per second sprinting
+const STAMINA_REGEN = 15;        // per second not sprinting
+const SPRINT_FLOOR = 12;         // needed before a sprint can start again
 
 // The minimap is repainted this often rather than every frame.
 const MINIMAP_PERIOD = 1 / 18;
 
-function createMonster(maze, walker, rng = Math.random) {
+function createMonster(maze, walker, rng = Math.random, minGap = MONSTER_MIN_START) {
   // Spawn as far away as the maze allows, but never on the exit — being made
   // to walk into the monster to finish would not be a fair maze.
   const far = [];
+  let best = null;
+  let bestGap = -1;
 
   for (let y = 1; y < maze.h - 1; y++) {
     for (let x = 1; x < maze.w - 1; x++) {
       if (isWall(maze, x, y)) continue;
       if (Math.abs(x - maze.exit.x) < 3 && Math.abs(y - maze.exit.y) < 3) continue;
       const gap = Math.abs(x - walker.x) + Math.abs(y - walker.y);
-      if (gap >= MONSTER_MIN_START) far.push({ x, y });
+      if (gap >= minGap) far.push({ x, y });
+      if (gap > bestGap) { bestGap = gap; best = { x, y }; }
     }
   }
 
-  const spot = far.length ? far[Math.floor(rng() * far.length)] : { ...maze.exit };
+  // A respawn asks for more room than the maze may have anywhere; take the
+  // furthest square there is rather than giving up and landing on the player.
+  const spot = far.length ? far[Math.floor(rng() * far.length)] : (best || { ...maze.exit });
 
   return {
     x: spot.x + 0.5,
@@ -280,12 +305,19 @@ function createMonster(maze, walker, rng = Math.random) {
     yaw: 0,
     path: [],
     sinceRepath: MONSTER_REPATH,   // work out a route on the first step
-    caught: false,
+    health: MONSTER_HEALTH,
+    dead: false,
+    touching: false,
+    flinch: 0,                     // counts down after a hit, for the flash
   };
 }
 
 function stepMonster(maze, monster, walker, dt) {
-  if (monster.caught || walker.escaped) return monster;
+  monster.flinch = Math.max(0, monster.flinch - dt);
+  if (monster.dead || walker.escaped) {
+    monster.touching = false;
+    return monster;
+  }
 
   monster.sinceRepath += dt;
   if (monster.sinceRepath >= MONSTER_REPATH
@@ -320,11 +352,57 @@ function stepMonster(maze, monster, walker, dt) {
     }
   }
 
-  if (Math.hypot(walker.x - monster.x, walker.y - monster.y) < CATCH_RADIUS) {
-    monster.caught = true;
-  }
-
+  monster.touching = Math.hypot(walker.x - monster.x, walker.y - monster.y) < MONSTER_REACH;
   return monster;
+}
+
+/* Is there an unbroken open line between two points? Sampled several times per
+   square, so a shot cannot slip diagonally through the corner of a wall. */
+function clearLine(maze, x0, y0, x1, y1) {
+  const steps = Math.ceil(Math.hypot(x1 - x0, y1 - y0) * 8);
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    if (isWall(maze, Math.floor(x0 + (x1 - x0) * t), Math.floor(y0 + (y1 - y0) * t))) return false;
+  }
+  return true;
+}
+
+/* Does a shot land? Hitscan: the round travels in a straight line the instant
+   it is fired, so all that matters is whether the creature is inside the cone
+   you are pointing down and whether a wall is in the way.
+
+   The cone widens as it gets closer, because that is how much of your view it
+   actually fills — atan of its half-width over the distance — plus a fixed
+   sliver of forgiveness so a shot that looks like it should connect does. */
+function shotHits(maze, walker, monster, range = SHOT_RANGE) {
+  if (!monster || monster.dead) return false;
+
+  const dx = monster.x - walker.x;
+  const dy = monster.y - walker.y;
+  const gap = Math.hypot(dx, dy);
+  if (gap > range) return false;
+
+  const half = Math.atan2(0.42, Math.max(0.4, gap));
+  const off = Math.atan2(dy, dx) - walker.yaw;
+  // Wrap to -pi..pi, or a shot due west compares against a 6-radian error.
+  const wrapped = Math.atan2(Math.sin(off), Math.cos(off));
+  if (Math.abs(wrapped) > half + AIM_ASSIST) return false;
+
+  return clearLine(maze, walker.x, walker.y, monster.x, monster.y);
+}
+
+/* Sprint stamina. Draining and refilling are both steady; the floor is what
+   stops an almost-empty bar flickering you in and out of a run every frame.
+   Standing still refills it — you only pay for ground covered. */
+function stepSprint(sprint, wanted, moving, dt) {
+  if (sprint.active && (!wanted || !moving || sprint.value <= 0)) sprint.active = false;
+  else if (!sprint.active && wanted && moving && sprint.value >= SPRINT_FLOOR) sprint.active = true;
+
+  sprint.value = sprint.active
+    ? Math.max(0, sprint.value - SPRINT_DRAIN * dt)
+    : Math.min(STAMINA_MAX, sprint.value + STAMINA_REGEN * dt);
+
+  return sprint.active;
 }
 
 // How near it feels, 0 (far off) to 1 (on top of you). Straight-line distance,
@@ -397,98 +475,94 @@ function drawMinimap(g, maze, walker, size, monster) {
 
    Pure apart from the context it draws into, so it can be rendered and looked
    at outside a browser. */
-/* The creature, drawn column by column so the wall depths can hide it: a
-   heavy domed cap over a pale face with hollow eyes and a wide grin. */
-function drawCreature(g, cx, feet, wide, tall, distance, depth, width) {
-  const left = Math.floor(cx - wide / 2);
-  const right = Math.ceil(cx + wide / 2);
-  const top = feet - tall;
-  const capH = tall * 0.33;
+/* The creature, drawn column by column so the wall depths can hide it.
+
+   Its silhouette is described as bands: for a given position across the body,
+   which parts are present and how tall they are. That keeps it one pass over
+   the columns — the same pass that tests each column against the wall in front
+   of it — with the fur ragged by a fixed hash so the outline is not a clean
+   curve. The face is the shared texture, blitted on at the end. */
+const FUR_BLUE = ['#1d63a8', '#256fb8', '#1a5b9b', '#2a7ac6'];
+
+function drawCreature(g, cx, feet, wide, tall, distance, depth, width, flinch = 0) {
+  const half = wide / 2;
+  const left = Math.floor(cx - half * 1.35);
+  const right = Math.ceil(cx + half * 1.35);
   // Solid until it is some way off, then fading into the haze. Thinning it out
   // at close range let the brickwork behind show straight through it.
   const fade = distance < 6 ? 1 : Math.max(0.3, 1 - (distance - 6) / 14);
+  const hit = Math.min(1, flinch * 4);
 
-  // Only the columns that are nearer than the wall behind them get drawn.
+  /* Heights as fractions of the whole figure, measured up from the feet, and
+     how far out across it each part reaches. Reading the figure off one table
+     keeps the parts joined up: the torso ends exactly where the legs start. */
+  const yAt = (f) => feet - tall * f;
+  const PARTS = [
+    // reachFrom, reachTo, top, bottom, orange?
+    [0, 0.95, 1.02, 0.7, false],    // head (domed, handled below)
+    [0, 0.8, 0.72, 0.38, false],    // torso, nearly as broad as the head
+    [0.18, 0.52, 0.39, 0.06, false],// legs, long and close together
+    [0.14, 0.6, 0.07, 0, true],     // feet
+    [0.85, 1.25, 0.68, 0.18, false],// arms, hanging almost to the floor
+    [0.85, 1.3, 0.19, 0.03, true],  // hands
+  ];
+
   for (let x = left; x <= right; x++) {
     if (x < 0 || x >= width) continue;
-    if (depth[x] <= distance) continue;
+    if (depth[x] <= distance) continue;          // behind a wall
 
-    const across = (x - cx) / (wide / 2);          // -1 .. 1
-    if (Math.abs(across) > 1) continue;
+    const reach = Math.abs((x - cx) / half);
 
-    g.globalAlpha = fade;
-
-    // Cap: a dome, so its height falls away toward the edges. Shaded a little
-    // darker down the left, which is what stops it reading as a flat cut-out.
-    const domeTop = top + capH * (1 - Math.sqrt(Math.max(0, 1 - across * across)));
-    const capBottom = top + capH;
-    g.fillStyle = across < -0.45 ? '#cdc8c1' : '#e6e2dc';
-    g.fillRect(x, domeTop, 1, Math.max(1, capBottom - domeTop));
-
-    // The dark crown is a second, smaller dome set into the cap — give it its
-    // own curve or the middle of the head looks like a painted-on rectangle.
-    const inset = Math.abs(across) / 0.46;
-    if (inset < 1) {
-      const crownTop = top + capH * (0.08 + 0.66 * (1 - Math.sqrt(1 - inset * inset)));
-      g.fillStyle = across < -0.2 ? '#7a1717' : '#8f1d1d';
-      g.fillRect(x, crownTop, 1, Math.max(1, capBottom - crownTop));
-    }
-
-    // The face sits under the cap brim; the eyes and grin are painted on it.
-    const faceBottom = capBottom + tall * 0.32;
-    if (Math.abs(across) < 0.78) {
-      g.fillStyle = across < -0.2 ? '#c8bca8' : '#ded2c0';
-      g.fillRect(x, capBottom, 1, Math.max(1, faceBottom - capBottom));
-    }
-
-    // Body: narrower still, and darkening toward the feet so it sinks into
-    // the floor rather than sitting on top of it.
-    if (Math.abs(across) < 0.5) {
-      g.fillStyle = across < -0.18 ? '#b9ae9f' : '#d5cabb';
-      g.fillRect(x, faceBottom, 1, Math.max(1, feet - faceBottom));
-      g.fillStyle = 'rgba(10, 12, 18, 0.45)';
-      g.fillRect(x, feet - tall * 0.05, 1, tall * 0.05);
-    } else if (Math.abs(across) < 0.76) {
-      // Long thin arms, hanging.
-      g.fillStyle = '#9e9280';
-      g.fillRect(x, faceBottom, 1, Math.max(1, feet - tall * 0.14 - faceBottom));
-    }
-
-    g.globalAlpha = 1;
-  }
-
-  // Face, only once it is close enough to make out.
-  if (wide > 20) {
-    const faceTop = top + capH;
-    const eyeY = faceTop + tall * 0.1;
-    const eyeR = wide * 0.09;
-    const visible = (px) => px >= 0 && px < width && depth[Math.round(px)] > distance;
+    /* Ragged fur, and a tone that shifts every few columns. Changing it on
+       every column turns the body into pinstripes rather than fur. */
+    const shag = (((x * 2654435761) ^ 0x9e3779b9) >>> 0) % 1000 / 1000;
+    const clump = ((((x / 3 | 0) * 374761393) >>> 0) % 4);
+    const fringe = tall * 0.018 * (shag - 0.5);
+    const fur = hit > 0 ? blend(FUR_BLUE[clump], '#f87171', hit * 0.7) : FUR_BLUE[clump];
+    const mitt = hit > 0 ? blend('#d98324', '#f87171', hit * 0.6) : '#d98324';
 
     g.globalAlpha = fade;
-    g.fillStyle = '#0b0b0d';
-    for (const side of [-1, 1]) {
-      const ex = cx + side * wide * 0.19;
-      if (!visible(ex)) continue;
-      g.beginPath();
-      g.ellipse(ex, eyeY, eyeR, eyeR * 1.45, 0, 0, Math.PI * 2);
-      g.fill();
-    }
 
-    if (visible(cx)) {                              // the grin
-      const mouthY = faceTop + tall * 0.23;
-      g.beginPath();
-      g.ellipse(cx, mouthY, wide * 0.3, tall * 0.04, 0, 0, Math.PI * 2);
-      g.fill();
+    PARTS.forEach(([from, until, top, bottom, orange], i) => {
+      if (reach < from || reach > until) return;
 
-      g.fillStyle = '#e8e8e8';                      // teeth
-      const teeth = 7;
-      for (let i = 0; i < teeth; i++) {
-        const tx = cx - wide * 0.25 + (wide * 0.5 / (teeth - 1)) * i;
-        g.fillRect(tx, mouthY - tall * 0.035, Math.max(1, wide * 0.022), tall * 0.032);
+      let hi = top;
+      if (i === 0) {
+        // The head falls away toward its edges rather than being a slab.
+        const dome = Math.sqrt(Math.max(0, 1 - (reach / until) ** 2));
+        hi = bottom + (top - bottom) * dome;
       }
-    }
+      if (hi <= bottom) return;
+
+      g.fillStyle = orange ? mitt : fur;
+      g.fillRect(x, yAt(hi) + (orange ? 0 : fringe), 1,
+        Math.max(1, tall * (hi - bottom) + 1));
+    });
+
     g.globalAlpha = 1;
   }
+
+  /* The face, from the same texture the 3D creature wears, so the two cannot
+     drift apart. Depth-tested at the centre only: the head is narrow enough
+     that a per-column test would not change what you see. */
+  const slab = creatureFace();
+  const mid = Math.round(cx);
+  if (slab && wide > 14 && mid >= 0 && mid < width && depth[mid] > distance) {
+    const size = wide * 1.2;
+    g.globalAlpha = fade;
+    g.drawImage(slab, 0, 0, FACE_TEX, FACE_TEX,
+      cx - size / 2, yAt(0.82) - size / 2, size, size);
+    g.globalAlpha = 1;
+  }
+}
+
+// Mix two #rrggbb colours, for the flash when it takes a hit.
+function blend(a, b, t) {
+  const parse = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const [ar, ag, ab] = parse(a);
+  const [br, bg, bb] = parse(b);
+  const k = Math.max(0, Math.min(1, t));
+  return `rgb(${Math.round(ar + (br - ar) * k)}, ${Math.round(ag + (bg - ag) * k)}, ${Math.round(ab + (bb - ab) * k)})`;
 }
 
 function drawRaycast(g, maze, walker, pitch, width, height, monster) {
@@ -672,13 +746,13 @@ function drawRaycast(g, maze, walker, pitch, width, height, monster) {
   }
 
   // The monster, billboarded and depth-tested like the exit.
-  if (monster) {
+  if (monster && !monster.dead) {
     const spot = floorPoint(monster.x, monster.y);
     const gap = Math.hypot(monster.x - walker.x, monster.y - walker.y);
     if (spot && gap > 0.05) {
       const camY = (EYE_HEIGHT / (spot.y - horizon)) * project;
-      const tall = (project / camY) * 1.42;
-      drawCreature(g, spot.x, spot.y, tall * 0.5, tall, camY, depth, width);
+      const tall = (project / camY) * 1.45;
+      drawCreature(g, spot.x, spot.y, tall * 0.42, tall, camY, depth, width, monster.flinch);
     }
   }
 
@@ -946,18 +1020,177 @@ function paintSky(g, size) {
   }
 }
 
+/* The creature's face, on a transparent square.
+
+   Painted once and used by both renderers — mapped onto a plane on the front of
+   the head in 3D, blitted onto the silhouette in the 2D fallback — so the two
+   cannot drift apart. It is also the only part of it with any fine detail, and
+   a texture is far cheaper than a mesh per tooth. */
+function paintFace(g, size) {
+  const cx = size / 2;
+
+  // Eyes: white domes, black pupils, a thin dark rim so they read against fur.
+  for (const side of [-1, 1]) {
+    const ex = cx + side * size * 0.15;
+    const ey = size * 0.3;
+    g.fillStyle = '#0b1220';
+    g.beginPath();
+    g.ellipse(ex, ey, size * 0.115, size * 0.115, 0, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = '#f8fafc';
+    g.beginPath();
+    g.ellipse(ex, ey, size * 0.1, size * 0.1, 0, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = '#0b1220';
+    g.beginPath();
+    g.ellipse(ex + side * size * 0.012, ey + size * 0.012, size * 0.052, size * 0.058, 0, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = 'rgba(255, 255, 255, 0.9)';
+    g.beginPath();
+    g.ellipse(ex - size * 0.03, ey - size * 0.032, size * 0.018, size * 0.014, 0, 0, Math.PI * 2);
+    g.fill();
+  }
+
+  // The grin: a wide red muzzle ring, a black gullet, and two rows of teeth.
+  const my = size * 0.58;
+  const mw = size * 0.34;
+  const mh = size * 0.19;
+
+  g.fillStyle = '#e11d48';
+  g.beginPath();
+  g.ellipse(cx, my, mw, mh, 0, 0, Math.PI * 2);
+  g.fill();
+  g.fillStyle = '#fb7185';                       // lighter inner lip
+  g.beginPath();
+  g.ellipse(cx, my, mw * 0.9, mh * 0.86, 0, 0, Math.PI * 2);
+  g.fill();
+  g.fillStyle = '#0a0a0c';
+  g.beginPath();
+  g.ellipse(cx, my, mw * 0.76, mh * 0.7, 0, 0, Math.PI * 2);
+  g.fill();
+
+  /* Teeth as triangles hung from the lips, their length following the curve of
+     the mouth so the middle ones are longest — which is what makes a row of
+     spikes read as a jaw rather than as a comb. */
+  const teeth = 11;
+  const span = mw * 1.34;
+  for (let i = 0; i < teeth; i++) {
+    const t = (i + 0.5) / teeth;
+    const tx = cx - span / 2 + span * t;
+    const curve = Math.sin(t * Math.PI);
+    const lip = mh * 0.7 * Math.sqrt(Math.max(0, 1 - ((tx - cx) / (mw * 0.76)) ** 2));
+    if (lip <= 0) continue;
+    const long = mh * 0.52 * curve;
+    const wide = span / teeth * 0.42;
+
+    for (const dir of [-1, 1]) {
+      g.fillStyle = dir < 0 ? '#f8fafc' : '#e2e8f0';
+      g.beginPath();
+      g.moveTo(tx - wide, my + dir * lip);
+      g.lineTo(tx + wide, my + dir * lip);
+      g.lineTo(tx, my + dir * (lip - long));
+      g.closePath();
+      g.fill();
+    }
+  }
+}
+
+let faceSlab = null;
+
+// The same face on a plain canvas, for the fallback to blit.
+function creatureFace() {
+  if (faceSlab !== null) return faceSlab;
+  faceSlab = false;
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = FACE_TEX;
+    canvas.height = FACE_TEX;
+    const g = canvas.getContext('2d');
+    if (g) {
+      paintFace(g, FACE_TEX);
+      faceSlab = canvas;
+    }
+  } catch {
+    faceSlab = false;
+  }
+  return faceSlab;
+}
+
+/* Shaggy blue fur: vertical streaks in a handful of tones, so the body has
+   direction to it rather than being one flat colour. */
+function paintFur(g, size) {
+  g.fillStyle = '#1d63a8';
+  g.fillRect(0, 0, size, size);
+
+  let n = 5150;
+  for (let i = 0; i < 900; i++) {
+    n = (n * 1664525 + 1013904223) >>> 0;
+    const x = n % size;
+    const y = (n >> 9) % size;
+    const len = 8 + ((n >> 18) % 34);
+    const tone = (n >> 5) % 4;
+    g.fillStyle = ['#2b7fc9', '#14507f', '#3a97dd', '#0f4272'][tone];
+    g.fillRect(x, y, 1 + ((n >> 22) % 2), len);
+  }
+}
+
+/* A normal map for the brickwork, derived from the same layout the colour map
+   uses: bricks stand proud, joints are recessed. Encoded the usual way — the
+   surface slope in x and y as red and green, with blue near full — so the walls
+   catch the light along every joint instead of being flat panels with a picture
+   of brick on them. */
+function paintBrickNormal(g, size) {
+  const rows = 8;
+  const cols = 4;
+  const brickH = size / rows;
+  const brickW = size / cols;
+  const edge = Math.max(2, Math.round(brickH * 0.16));
+
+  g.fillStyle = 'rgb(128, 128, 255)';             // flat, facing straight out
+  g.fillRect(0, 0, size, size);
+
+  for (let row = 0; row < rows; row++) {
+    const offset = (row % 2) * 0.5;
+    for (let i = -1; i < cols + 1; i++) {
+      const x = Math.round((i + offset) * brickW);
+      const y = Math.round(row * brickH);
+      const w = Math.round(brickW) - 3;
+      const h = Math.round(brickH) - 3;
+
+      for (let e = 0; e < edge; e++) {
+        const slope = Math.round(110 * (1 - e / edge));   // steepest at the joint
+        // Top edge tips up, bottom edge tips down.
+        g.fillStyle = `rgb(128, ${128 + slope}, 235)`;
+        g.fillRect(x + 2, y + 2 + e, w, 1);
+        g.fillStyle = `rgb(128, ${128 - slope}, 235)`;
+        g.fillRect(x + 2, y + h + 1 - e, w, 1);
+        // Left edge tips left, right edge tips right.
+        g.fillStyle = `rgb(${128 - slope}, 128, 235)`;
+        g.fillRect(x + 2 + e, y + 2, 1, h);
+        g.fillStyle = `rgb(${128 + slope}, 128, 235)`;
+        g.fillRect(x + w + 1 - e, y + 2, 1, h);
+      }
+    }
+  }
+}
+
 /* Wrapped as three.js textures for the WebGL scene. */
 function makeTextures() {
   if (textures) return textures;
 
-  const brick = paintCanvas(256, paintBrick);
+  const brick = paintCanvas(BRICK_TEX, paintBrick);
+  const relief = paintCanvas(BRICK_TEX, paintBrickNormal);
   const cap = paintCanvas(64, paintCap);
   const floor = paintCanvas(256, paintFloor);
+  const fur = paintCanvas(128, paintFur);
+  const face = paintCanvas(FACE_TEX, paintFace);
   const sky = paintCanvas(512, paintSky);
   sky.wrapS = THREE.ClampToEdgeWrapping;
   sky.wrapT = THREE.ClampToEdgeWrapping;
+  face.wrapS = THREE.ClampToEdgeWrapping;
+  face.wrapT = THREE.ClampToEdgeWrapping;
 
-  textures = { brick, cap, floor, sky };
+  textures = { brick, relief, cap, floor, fur, face, sky };
   return textures;
 }
 
@@ -1028,7 +1261,16 @@ function mountMaze(ctx) {
   let courseDone = false;
   let monster = null;
   let stalker = null;
-  let caught = false;
+  let dead = false;
+  let health = PLAYER_HEALTH;
+  let kills = 0;
+  let shotTimer = 0;                       // counts down to the next shot
+  let flash = 0;                           // muzzle flash, seconds remaining
+  const sprint = { value: STAMINA_MAX, active: false };
+  const drive = {                          // what stepWalker is actually given
+    forward: false, back: false, left: false, right: false,
+    strafeLeft: false, strafeRight: false, sprint: false,
+  };
   let footfall = 0;
   let mapAge = MINIMAP_PERIOD;   // draw on the first frame
   const lastFoot = { x: null, y: null };
@@ -1036,10 +1278,13 @@ function mountMaze(ctx) {
   let camera = null;
   let renderer = null;
   let walls = null;
+  let coping = null;
+  let reveal = null;
   let torch = null;
   let exitPillar = null;
   let exitGlow = null;
   let creature = null;
+  let creatureFur = null;   // shared material, flashed red when it is hit
   let pitch = 0;          // mouse look up/down, radians
   let mouseLook = false;  // only true while the pointer is locked
   let flatCanvas = null;  // the 2D fallback view, when WebGL is unavailable
@@ -1071,6 +1316,7 @@ function mountMaze(ctx) {
     { key: 'level', label: 'Maze', value: '1', tone: 'x' },
     { key: 'time', label: 'Total Time', value: '0:00', tone: 'muted' },
     { key: 'left', label: 'Shortest Route', value: '—', tone: 'muted' },
+    { key: 'kills', label: 'Put Down', value: '0', tone: 'x' },
     { key: 'best', label: 'Best Run', value: '—', tone: 'o' },
   ]);
 
@@ -1089,6 +1335,54 @@ function mountMaze(ctx) {
   minimap.height = MINIMAP_PX;
   const map2d = minimap.getContext('2d');
 
+  /* The HUD lives in the DOM rather than being painted into the canvas, so one
+     copy serves both renderers and it stays crisp in fullscreen, where the
+     canvas itself is drawn at less than screen resolution. */
+  function meter(kind, label) {
+    const el = document.createElement('div');
+    el.className = `gauge gauge--${kind}`;
+    const name = document.createElement('span');
+    name.className = 'gauge__label';
+    name.textContent = label;
+    const track = document.createElement('span');
+    track.className = 'gauge__track';
+    const fill = document.createElement('span');
+    fill.className = 'gauge__fill';
+    track.append(fill);
+    el.append(name, track);
+    return {
+      el,
+      set(fraction, dim) {
+        fill.style.width = `${(Math.max(0, Math.min(1, fraction)) * 100).toFixed(1)}%`;
+        el.classList.toggle('is-dim', Boolean(dim));
+        el.classList.toggle('is-low', fraction < 0.3);
+      },
+    };
+  }
+
+  const healthBar = meter('health', 'You');
+  const sprintBar = meter('sprint', 'Sprint');
+  const foeBar = meter('foe', 'Huggy');
+
+  const hud = document.createElement('div');
+  hud.className = 'hud';
+  hud.append(healthBar.el, sprintBar.el, foeBar.el);
+
+  // Crosshair, and the muzzle flash that blooms behind it on every shot.
+  const sight = document.createElement('div');
+  sight.className = 'sight';
+
+  function refreshBars(closeness) {
+    healthBar.set(health / PLAYER_HEALTH);
+    sprintBar.set(sprint.value / STAMINA_MAX, !sprint.active && sprint.value < SPRINT_FLOOR);
+    const alive = monster && !monster.dead;
+    foeBar.set(alive ? monster.health / MONSTER_HEALTH : 0, !alive || closeness < 0.12);
+    sight.classList.toggle('is-firing', flash > 0);
+    sight.classList.toggle('is-ready', shotTimer <= 0);
+    sight.classList.toggle('is-on-target',
+      Boolean(monster) && !monster.dead && shotHits(maze, walker, monster));
+  }
+
   // Shown in place of the 3D view when it cannot start.
   function fallbackNote(reason) {
     const note = document.createElement('p');
@@ -1099,13 +1393,22 @@ function mountMaze(ctx) {
 
   ctx.settings.append(courseRow.el);
   ctx.score.append(scoreRow.el);
-  ctx.stage.append(view, pad);
+  const fireRow = document.createElement('div');
+  fireRow.className = 'holdrow';
+  const fireBtn = document.createElement('button');
+  fireBtn.type = 'button';
+  fireBtn.className = 'holdrow__btn holdrow__btn--fire';
+  fireBtn.textContent = 'Fire';
+  fireBtn.addEventListener('click', () => fire());
+  fireRow.append(fireBtn);
+
+  ctx.stage.append(view, pad, fireRow);
   ctx.controls.append(buttonRow([{ label: 'New Run', onClick: restart }]));
   // The shell's fullscreen button drives the 3D view rather than the whole
   // page, so going fullscreen also grabs the pointer for mouse look.
   ctx.setFullscreenTarget(view);
   ctx.setTheme('maze');
-  ctx.setHint('W S walk · A D strafe · ← → turn · space sprint · ⛶ mouse look · something is hunting you');
+  ctx.setHint('W S walk · A D strafe · ← → turn · space sprint · click or F to shoot · ⛶ mouse look');
 
   function setInput(dir, down) {
     if (dir === 'up') input.forward = down;
@@ -1139,7 +1442,19 @@ function mountMaze(ctx) {
     scene.add(skyDome);
 
     const wallGeometry = new THREE.BoxGeometry(1, WALL_HEIGHT, 1);
-    const brickSide = new THREE.MeshLambertMaterial({ map: skin.brick, color: 0xffffff });
+    /* Phong rather than Lambert, for the normal map: every joint and bevel in
+       the brickwork then catches the light as real relief instead of being a
+       photograph of brick on a flat panel. It is the single biggest thing that
+       makes the corridors read as three-dimensional, and it costs one texture
+       rather than any extra geometry. */
+    const brickSide = new THREE.MeshPhongMaterial({
+      map: skin.brick,
+      normalMap: skin.relief,
+      normalScale: new THREE.Vector2(0.85, 0.85),
+      shininess: 6,
+      specular: 0x2a2f36,
+      color: 0xffffff,
+    });
     const brickTop = new THREE.MeshLambertMaterial({ map: skin.cap, color: 0xffffff });
     // BoxGeometry face order is +x, -x, +y, -y, +z, -z — index 2 is the top,
     // which is on show now there is no ceiling.
@@ -1175,6 +1490,37 @@ function mountMaze(ctx) {
     if (walls.instanceColor) walls.instanceColor.needsUpdate = true;
     scene.add(walls);
 
+    /* A coping course capping every wall: a little wider than the wall, a
+       little paler, with a shadow line under its overhang. It is what turns a
+       row of cubes into built architecture, and because it is one instanced
+       mesh with a single material it is one more draw call for the lot. */
+    coping = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1.13, 0.09, 1.13),
+      new THREE.MeshPhongMaterial({ color: 0xdfe3e6, shininess: 18, specular: 0x3a4048 }),
+      blocks.length);
+
+    blocks.forEach(([x, y], i) => {
+      placer.position.set(x + 0.5, WALL_HEIGHT + 0.02, y + 0.5);
+      placer.updateMatrix();
+      coping.setMatrixAt(i, placer.matrix);
+    });
+    coping.instanceMatrix.needsUpdate = true;
+    scene.add(coping);
+
+    // And a dark reveal in the shade of that overhang.
+    reveal = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(1.04, 0.05, 1.04),
+      new THREE.MeshBasicMaterial({ color: 0x3d444c }),
+      blocks.length);
+
+    blocks.forEach(([x, y], i) => {
+      placer.position.set(x + 0.5, WALL_HEIGHT - 0.04, y + 0.5);
+      placer.updateMatrix();
+      reveal.setMatrixAt(i, placer.matrix);
+    });
+    reveal.instanceMatrix.needsUpdate = true;
+    scene.add(reveal);
+
     // Floor tiles, one per grid square. The texture holds a 2x2 block, so the
     // repeat is half the maze in each direction.
     const floorTexture = skin.floor.clone();
@@ -1185,7 +1531,11 @@ function mountMaze(ctx) {
 
     const floor = new THREE.Mesh(
       new THREE.PlaneGeometry(maze.w, maze.h),
-      new THREE.MeshLambertMaterial({ map: floorTexture, color: 0xffffff }));
+      // A wide, weak highlight: sealed concrete rather than matte grit, which
+      // is what gives the floor a direction under the sky.
+      new THREE.MeshPhongMaterial({
+        map: floorTexture, color: 0xffffff, shininess: 26, specular: 0x2d3646,
+      }));
     floor.rotation.x = -Math.PI / 2;
     floor.position.set(maze.w / 2, 0, maze.h / 2);
     scene.add(floor);
@@ -1222,48 +1572,78 @@ function mountMaze(ctx) {
     torch = null;
     scene.add(camera);
 
-    /* The creature: a heavy pale cap with a dark crown over a round face with
-       hollow eyes and a wide grin. Built from primitives so it costs nothing
-       to draw and needs no model file. */
+    /* The creature.
+
+       A tall, shaggy blue thing: a wide head with round eyes and a mouth full
+       of teeth, a bow at the throat, arms long enough to trail past its knees,
+       and big orange hands and feet. Built from primitives with a fur texture
+       over them — the only fine detail is the face, and that is one textured
+       plane rather than a mesh per tooth.
+
+       Kept under the 1.5-unit wall height so it never pokes over the top of
+       the maze and give itself away from three corridors off. */
     creature = new THREE.Group();
 
-    const cap = new THREE.Mesh(
-      new THREE.SphereGeometry(0.44, 20, 14, 0, Math.PI * 2, 0, Math.PI * 0.62),
-      new THREE.MeshLambertMaterial({ color: 0xe8e4de }));
-    cap.position.y = 0.86;
-    cap.scale.set(1, 0.82, 1);
-    creature.add(cap);
+    creatureFur = new THREE.MeshLambertMaterial({ map: skin.fur, color: 0xffffff });
+    const mitt = new THREE.MeshLambertMaterial({ color: 0xd98324 });
 
-    const crown = new THREE.Mesh(
-      new THREE.SphereGeometry(0.3, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.5),
-      new THREE.MeshLambertMaterial({ color: 0x8f1d1d }));
-    crown.position.y = 0.95;
-    crown.scale.set(1, 0.72, 1);
-    creature.add(crown);
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.29, 18, 14), creatureFur);
+    head.position.y = 1.14;
+    head.scale.set(1.12, 1, 0.92);
+    creature.add(head);
 
-    const face = new THREE.Mesh(
-      new THREE.SphereGeometry(0.24, 16, 12),
-      new THREE.MeshLambertMaterial({ color: 0xd8c9b6 }));
-    face.position.y = 0.6;
-    creature.add(face);
-
-    const dark = new THREE.MeshBasicMaterial({ color: 0x08080a });
-    for (const side of [-1, 1]) {
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.06, 10, 8), dark);
-      eye.position.set(side * 0.09, 0.65, 0.2);
-      eye.scale.set(1, 1.5, 0.6);
-      creature.add(eye);
+    // Fur tufts, so the outline is not a clean ball.
+    for (const [tx, tz, lean] of [[-0.16, -0.02, -0.5], [0.02, 0.06, 0.1], [0.18, -0.04, 0.55]]) {
+      const tuft = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.22, 7), creatureFur);
+      tuft.position.set(tx, 1.36, tz);
+      tuft.rotation.z = lean;
+      creature.add(tuft);
     }
 
-    const grin = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.09, 0.06), dark);
-    grin.position.set(0, 0.53, 0.21);
-    creature.add(grin);
+    // The face: eyes, lips and teeth in one texture on a plane just proud of
+    // the head. alphaTest rather than blending, so there is nothing to sort.
+    const facePlane = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.52, 0.52),
+      new THREE.MeshLambertMaterial({
+        map: skin.face, transparent: true, alphaTest: 0.4, color: 0xffffff,
+      }));
+    facePlane.position.set(0, 1.13, 0.28);
+    creature.add(facePlane);
 
-    const body = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.17, 0.22, 0.42, 12),
-      new THREE.MeshLambertMaterial({ color: 0xd2c7b8 }));
-    body.position.y = 0.24;
-    creature.add(body);
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.16, 0.46, 14), creatureFur);
+    torso.position.y = 0.74;
+    creature.add(torso);
+
+    // The bow at its throat.
+    for (const side of [-1, 1]) {
+      const loop = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.1, 8), creatureFur);
+      loop.position.set(side * 0.07, 0.95, 0.17);
+      loop.rotation.z = side * Math.PI * 0.5;
+      creature.add(loop);
+    }
+
+    for (const side of [-1, 1]) {
+      // Arms, hanging almost to the floor and swung slightly out.
+      const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.045, 0.78, 8), creatureFur);
+      arm.position.set(side * 0.25, 0.6, 0.02);
+      arm.rotation.z = side * 0.16;
+      creature.add(arm);
+
+      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.075, 10, 8), mitt);
+      hand.position.set(side * 0.32, 0.22, 0.04);
+      hand.scale.set(1, 1.5, 0.8);
+      creature.add(hand);
+
+      // Legs and feet.
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.05, 0.56, 8), creatureFur);
+      leg.position.set(side * 0.1, 0.29, 0);
+      creature.add(leg);
+
+      const foot = new THREE.Mesh(new THREE.SphereGeometry(0.085, 10, 8), mitt);
+      foot.position.set(side * 0.1, 0.05, 0.06);
+      foot.scale.set(0.85, 0.55, 1.5);
+      creature.add(foot);
+    }
 
     scene.add(creature);
   }
@@ -1280,6 +1660,9 @@ function mountMaze(ctx) {
     });
     if (camera) camera.clear();
     creature = null;
+    creatureFur = null;
+    coping = null;
+    reveal = null;
   }
 
   function startRenderer() {
@@ -1344,9 +1727,9 @@ function mountMaze(ctx) {
     flatCanvas = document.createElement('canvas');
     flatCanvas.className = 'viewport__canvas';
     flat = flatCanvas.getContext('2d');
-    view.replaceChildren(flatCanvas, minimap);
+    view.replaceChildren(flatCanvas, minimap, hud, sight);
     resize();
-    ctx.setHint('W S walk · A D strafe · ← → turn · space sprint · ⛶ mouse look · something is hunting you');
+    ctx.setHint('W S walk · A D strafe · ← → turn · space sprint · click or F to shoot · ⛶ mouse look');
     ctx.setStatus(`${reason} Playing in 2D instead.`);
     loadLevel();
     start();
@@ -1360,9 +1743,34 @@ function mountMaze(ctx) {
     lastTime = time;
 
     const before = walker.escaped;
-    stepWalker(maze, walker, input, dt);
-    if (monster && !caught) stepMonster(maze, monster, walker, dt);
-    if (!courseDone && !caught) seconds += dt;
+
+    /* Sprinting is gated on the bar rather than on the key: hold space with an
+       empty bar and you simply walk. Standing still refills it, so the cost is
+       for ground covered, not for holding a key down. */
+    const moving = input.forward || input.back || input.strafeLeft || input.strafeRight;
+    Object.assign(drive, input);
+    drive.sprint = stepSprint(sprint, input.sprint, moving, dt);
+
+    stepWalker(maze, walker, drive, dt);
+    if (monster && !dead) stepMonster(maze, monster, walker, dt);
+    if (!courseDone && !dead) seconds += dt;
+
+    shotTimer = Math.max(0, shotTimer - dt);
+    flash = Math.max(0, flash - dt);
+
+    // Taking damage, and healing back only once it has lost you.
+    if (monster && !dead && !courseDone) {
+      const near = monsterCloseness(monster, walker);
+      if (monster.touching) {
+        health -= MONSTER_DAMAGE * dt;
+        if (Math.random() < dt * 2) audio.play('hurt');
+        if (health <= 0) return killed();
+      } else if (near < 0.2 && health < PLAYER_HEALTH) {
+        health = Math.min(PLAYER_HEALTH, health + HEALTH_REGEN * dt);
+      }
+    }
+
+    refreshBars(monster ? monsterCloseness(monster, walker) : 0);
 
     // A little head bob while walking, and a torch that flickers.
     const walking = (input.forward || input.back) && !walker.escaped;
@@ -1377,11 +1785,15 @@ function mountMaze(ctx) {
     // Keep the creature where the simulation says it is, always facing you,
     // lurching a little as it walks.
     if (creature) {
-      creature.visible = Boolean(monster) && !caught;
+      creature.visible = Boolean(monster) && !monster.dead && !dead;
       if (monster) {
         creature.position.set(monster.x, Math.abs(Math.sin(seconds * 6)) * 0.05, monster.y);
         creature.rotation.y = Math.atan2(walker.x - monster.x, walker.y - monster.y);
         creature.rotation.z = Math.sin(seconds * 3) * 0.05;
+        if (creatureFur) {
+          const hit = Math.min(1, monster.flinch * 4);
+          creatureFur.color.setRGB(1, 1 - hit * 0.55, 1 - hit * 0.6);
+        }
       }
     }
 
@@ -1401,7 +1813,7 @@ function mountMaze(ctx) {
     scoreRow.set('time', clock(seconds));
 
     // Proximity drone, and a footstep every so often as you cover ground.
-    if (stalker) stalker.set(monster && !caught ? monsterCloseness(monster, walker) : 0);
+    if (stalker) stalker.set(monster && !monster.dead && !dead ? monsterCloseness(monster, walker) : 0);
     footfall += Math.hypot(walker.x - (lastFoot.x ?? walker.x), walker.y - (lastFoot.y ?? walker.y));
     lastFoot.x = walker.x;
     lastFoot.y = walker.y;
@@ -1410,16 +1822,50 @@ function mountMaze(ctx) {
       audio.play('step');
     }
 
-    if (monster && monster.caught && !caught) return grabbed();
     if (walker.escaped && !before) escape();
   }
 
-  // Caught. The run is over wherever you were in it.
-  function grabbed() {
-    caught = true;
+  // Out of health. The run ends wherever you were in it.
+  function killed() {
+    dead = true;
+    health = 0;
+    refreshBars(1);
     stop();
     audio.play('caught');
-    ctx.setStatus(`It caught you on maze ${level + 1} of ${course.levels.length} · ${clock(seconds)}`, false);
+    ctx.setStatus(
+      `It got you on maze ${level + 1} of ${course.levels.length} · ${clock(seconds)}` +
+      `${kills ? ` · ${kills} put down` : ''} — press New Run`, false);
+  }
+
+  /* Firing. Hitscan, so the shot lands or misses the instant you pull the
+     trigger; the rate of fire is what stops you emptying a hundred points into
+     it in half a second. */
+  function fire() {
+    if (dead || courseDone || !monster || shotTimer > 0) return;
+    shotTimer = SHOT_COOLDOWN;
+    flash = 0.07;
+    audio.play('shot');
+
+    if (!shotHits(maze, walker, monster)) return;
+
+    audio.play('impact');
+    monster.health -= SHOT_DAMAGE;
+    monster.flinch = 0.22;
+
+    if (monster.health > 0) {
+      refreshBars(monsterCloseness(monster, walker));
+      return;
+    }
+
+    // Down, and back on its feet somewhere else entirely.
+    monster.dead = true;
+    monster.touching = false;
+    kills += 1;
+    scoreRow.set('kills', kills);
+    audio.play('slain');
+    monster = createMonster(maze, walker, Math.random, RESPAWN_MIN);
+    refreshBars(0);
+    ctx.setStatus(`Down — but it is already back on its feet somewhere. ${kills} so far.`);
   }
 
   // Escaping one maze drops you straight into the next. The clock keeps
@@ -1454,6 +1900,9 @@ function mountMaze(ctx) {
     maze = buildMaze(cells, cells);
     walker = createWalker(maze);
     monster = createMonster(maze, walker);
+    health = PLAYER_HEALTH;
+    sprint.value = STAMINA_MAX;
+    refreshBars(0);
     footfall = 0;
     lastFoot.x = null;
     lastFoot.y = null;
@@ -1486,7 +1935,13 @@ function mountMaze(ctx) {
     level = 0;
     seconds = 0;
     courseDone = false;
-    caught = false;
+    dead = false;
+    health = PLAYER_HEALTH;
+    kills = 0;
+    sprint.value = STAMINA_MAX;
+    sprint.active = false;
+    shotTimer = 0;
+    scoreRow.set('kills', 0);
     Object.keys(input).forEach((k) => { input[k] = false; });
 
     scoreRow.set('time', clock(0));
@@ -1494,7 +1949,7 @@ function mountMaze(ctx) {
     loadLevel();
 
     if (!renderer && !flat) return;     // still loading
-    if (renderer) view.replaceChildren(renderer.domElement, minimap);
+    if (renderer) view.replaceChildren(renderer.domElement, minimap, hud, sight);
     resize();
     ctx.setStatus(`${whereAmI()} — find the way out`);
     start();
@@ -1512,6 +1967,11 @@ function mountMaze(ctx) {
   };
 
   function onKeyDown(event) {
+    if (event.key === 'f' || event.key === 'F') {
+      event.preventDefault();
+      fire();
+      return;
+    }
     const dir = KEYS[event.key];
     if (!dir) return;
     event.preventDefault();   // stops space scrolling the page
@@ -1560,8 +2020,15 @@ function mountMaze(ctx) {
 
   // Clicking the view while already fullscreen re-grabs the pointer, which is
   // what players expect after pressing Esc once.
-  view.addEventListener('click', () => {
-    if (inFullscreen() && !mouseLook && view.requestPointerLock) view.requestPointerLock();
+  view.addEventListener('mousedown', (event) => {
+    if (event.button !== 0) return;
+    if (inFullscreen() && !mouseLook) {
+      // The click that takes the pointer back should not also cost a round.
+      if (view.requestPointerLock) view.requestPointerLock();
+      return;
+    }
+    event.preventDefault();
+    fire();
   });
 
   document.addEventListener('fullscreenchange', onFullscreenChange);
@@ -1628,7 +2095,10 @@ if (typeof module !== 'undefined') {
     buildMaze, solveMaze, isWall, createWalker, stepWalker, moveWalker,
     MAZE_COURSES, courseById, WALKER_RADIUS, WALK_SPEED, TURN_SPEED, SPRINT_MULTIPLIER,
     drawRaycast, drawMinimap, cellKey, keyX, keyY, MAZE_FOV, WALL_HEIGHT, EYE_HEIGHT,
-    makeTextures, createMonster, stepMonster, monsterCloseness,
-    MONSTER_SPEED, MONSTER_MIN_START, CATCH_RADIUS,
+    makeTextures, drawCreature, createMonster, stepMonster, monsterCloseness,
+    shotHits, clearLine, stepSprint,
+    MONSTER_SPEED, MONSTER_MIN_START, MONSTER_REACH, MONSTER_DAMAGE, RESPAWN_MIN,
+    PLAYER_HEALTH, MONSTER_HEALTH, SHOT_DAMAGE, SHOT_RANGE,
+    STAMINA_MAX, SPRINT_DRAIN, STAMINA_REGEN, SPRINT_FLOOR,
   };
 }

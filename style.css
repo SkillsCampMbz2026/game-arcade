@@ -700,6 +700,22 @@ h1 {
 .holdrow__btn:hover { background: linear-gradient(180deg, #3a4c6d, var(--surface-hi)); color: var(--text); }
 .holdrow__btn:active { transform: scale(0.95); box-shadow: var(--sink); color: var(--x); }
 
+/* The maze's trigger, kept obviously separate from the movement pad. */
+.holdrow__btn--fire {
+  min-width: 118px;
+  background: linear-gradient(180deg, #ef4444, #991b1b);
+  border-color: rgba(248, 113, 113, 0.5);
+  color: #fff5f5;
+  letter-spacing: 0.12em;
+}
+
+.holdrow__btn--fire:hover {
+  background: linear-gradient(180deg, #f87171, #b91c1c);
+  color: #fff;
+}
+
+.holdrow__btn--fire:active { color: #fff; }
+
 .dpad--flat {
   grid-template-columns: repeat(2, 72px);
   grid-template-rows: 44px;
@@ -768,6 +784,112 @@ html:fullscreen {
   display: block;
   width: 100%;
   height: auto;
+}
+
+/* ---------- Maze HUD ---------- */
+
+/* Bars and crosshair are DOM, not canvas: one copy serves the WebGL and the 2D
+   renderer, and they stay crisp in fullscreen where the canvas itself is drawn
+   at less than screen resolution. */
+.hud {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(230px, 42%);
+  pointer-events: none;
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.gauge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: opacity 0.2s;
+}
+
+.gauge.is-dim { opacity: 0.35; }
+
+.gauge__label {
+  flex: 0 0 44px;
+  color: rgba(226, 232, 240, 0.85);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+
+.gauge__track {
+  flex: 1;
+  height: 9px;
+  border-radius: 5px;
+  border: 1px solid rgba(226, 232, 240, 0.3);
+  background: rgba(6, 11, 25, 0.6);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.gauge__fill {
+  display: block;
+  height: 100%;
+  width: 100%;
+  border-radius: 4px;
+  transition: width 0.12s linear, background 0.2s;
+}
+
+.gauge--health .gauge__fill { background: linear-gradient(90deg, #16a34a, #4ade80); }
+.gauge--sprint .gauge__fill { background: linear-gradient(90deg, #0284c7, #38bdf8); }
+.gauge--foe .gauge__fill    { background: linear-gradient(90deg, #7f1d1d, #ef4444); }
+
+/* Running out of anything turns its bar amber and makes it pulse. */
+.gauge.is-low:not(.gauge--foe) .gauge__fill {
+  background: linear-gradient(90deg, #b45309, #fbbf24);
+  animation: gaugelow 0.7s ease-in-out infinite alternate;
+}
+
+@keyframes gaugelow {
+  from { filter: brightness(1); }
+  to   { filter: brightness(1.6); }
+}
+
+/* Crosshair. It opens up while the shot is reloading and turns red the moment
+   the creature is actually in the line of fire, so aiming is readable without
+   any numbers on screen. */
+.sight {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 1;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  pointer-events: none;
+}
+
+.sight::before,
+.sight::after {
+  content: "";
+  position: absolute;
+  background: rgba(232, 240, 254, 0.85);
+  box-shadow: 0 0 4px rgba(0, 0, 0, 0.9);
+  transition: background 0.1s, transform 0.12s;
+}
+
+.sight::before { left: 50%; top: 0; width: 2px; height: 100%; margin-left: -1px; }
+.sight::after  { top: 50%; left: 0; height: 2px; width: 100%; margin-top: -1px; }
+
+.sight.is-on-target::before,
+.sight.is-on-target::after { background: #ef4444; }
+
+.sight:not(.is-ready)::before { transform: scaleY(0.55); }
+.sight:not(.is-ready)::after  { transform: scaleX(0.55); }
+
+/* The muzzle flash: a single bloom behind the crosshair. */
+.sight.is-firing {
+  background: radial-gradient(circle, rgba(255, 236, 170, 0.85), rgba(255, 190, 80, 0) 70%);
+  transform: scale(3.4);
 }
 
 /* Minimap: a fixed square overlay, the same size windowed or fullscreen so it

@@ -125,6 +125,23 @@ const audio = (() => {
     lose: () => notes([392, 330, 262], 0.13, { type: 'sawtooth', gain: 0.18 }),
     draw: () => notes([440, 415], 0.12),
     step: () => hiss({ dur: 0.07, freq: 260, gain: 0.09, type: 'lowpass' }),
+    // A crack and a thump: bright noise for the report, a falling tone under
+    // it for the recoil.
+    shot: () => {
+      hiss({ dur: 0.09, freq: 3200, gain: 0.3, type: 'highpass' });
+      tone({ freq: 260, to: 60, dur: 0.16, type: 'square', gain: 0.24 });
+    },
+    impact: () => hiss({ dur: 0.11, freq: 700, gain: 0.2, type: 'bandpass' }),
+    hurt: () => {
+      tone({ freq: 170, to: 90, dur: 0.22, type: 'sawtooth', gain: 0.2 });
+      hiss({ dur: 0.18, freq: 420, gain: 0.16, type: 'lowpass' });
+    },
+    // Something large going down: a long descending howl.
+    slain: () => {
+      tone({ freq: 420, to: 48, dur: 0.9, type: 'sawtooth', gain: 0.26 });
+      tone({ freq: 300, to: 40, dur: 1, type: 'triangle', gain: 0.18, delay: 0.06 });
+      hiss({ dur: 0.7, freq: 300, gain: 0.16, type: 'lowpass' });
+    },
     caught: () => {
       tone({ freq: 320, to: 60, dur: 0.7, type: 'sawtooth', gain: 0.34 });
       tone({ freq: 190, to: 44, dur: 0.8, type: 'square', gain: 0.2, delay: 0.04 });
