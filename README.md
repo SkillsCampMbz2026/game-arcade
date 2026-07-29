@@ -15,7 +15,7 @@ vendored in `vendor/` and loaded on demand by the maze.
 | **Matching Cards** | Four board sizes, solo against the clock or two players |
 | **Snake** | Three speeds and sizes, solid walls or wrap-around, saved best scores |
 | **Car Racing** | 3D perspective racer — 8 cars, 6 laps, 3 maps, pick your car and paint |
-| **Escape the Maze** | First-person 3D maze runs — finish 3, 5 or 8 mazes against the clock |
+| **Escape the Maze** | First-person 3D maze runs — pick Small, Medium or Large and finish three |
 
 ## The CPU opponents
 
@@ -70,10 +70,11 @@ so the mouse steers the camera —
 leave fullscreen and it releases, and the mouse is an ordinary cursor again.
 Keyboard turning works either way.
 
-A run is a **course**: escape one maze and you drop straight into the next,
-bigger one, with the clock running across the whole run. Only finishing every
-maze completes the course. Sprint is 3 mazes, Standard 5, Marathon 8, ramping
-from 10x10 up to 38x38.
+Pick a size and you get a run of three mazes at that scale, each a little
+bigger than the last. Escape one and you drop straight into the next, with the
+clock running across the whole run; only finishing all three completes it.
+Small runs 16x16 to 24x24, Medium 24 to 36, Large 36 to 52 — a 52 is a 105x105
+grid with a shortest route of around 940 steps.
 
 Brick walls, tiled floors and the sky are painted onto 2D canvases at load
 time and used as textures, so there are still no image files to download. The

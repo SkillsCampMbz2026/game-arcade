@@ -11,13 +11,16 @@
 
 const THREE_SRC = 'vendor/three.min.js';
 
-/* A course is a run of mazes to finish, each bigger than the last. Escaping
-   one drops you straight into the next; the clock runs across the whole run,
-   and only completing every maze counts as finishing the course. */
+/* Pick a size and you get a run of three mazes at that scale, each a little
+   bigger than the last. Escaping one drops you straight into the next; the
+   clock runs across the whole run, and only finishing all three completes it.
+
+   Even "small" is a big maze — the numbers are cells square, so a 16 is a
+   33x33 grid and a 52 is a 105x105 one. */
 const MAZE_COURSES = [
-  { id: 'sprint', label: 'Sprint', levels: [10, 14, 18] },
-  { id: 'standard', label: 'Standard', levels: [10, 14, 18, 22, 26] },
-  { id: 'marathon', label: 'Marathon', levels: [10, 14, 18, 22, 26, 30, 34, 38] },
+  { id: 'small', label: 'Small', levels: [16, 20, 24] },
+  { id: 'medium', label: 'Medium', levels: [24, 30, 36] },
+  { id: 'large', label: 'Large', levels: [36, 44, 52] },
 ];
 
 const courseById = (id) => MAZE_COURSES.find((c) => c.id === id) || MAZE_COURSES[1];
@@ -629,14 +632,16 @@ function mountMaze(ctx) {
   const input = { forward: false, back: false, left: false, right: false };
 
   const bestKey = () => `maze-best-${course.id}`;
+  const sizeLabel = () => `${course.levels[level]}x${course.levels[level]}`;
+  const whereAmI = () => `Maze ${level + 1} of ${course.levels.length} · ${sizeLabel()}`;
   const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 
   /* ---------- chrome ---------- */
 
   const courseRow = segmented(
-    MAZE_COURSES.map((c) => ({ id: c.id, label: `${c.label} (${c.levels.length})` })),
+    MAZE_COURSES.map((c) => ({ id: c.id, label: `${c.label} (${c.levels[0]}–${c.levels[c.levels.length - 1]})` })),
     course.id, (id) => { course = courseById(id); restart(); },
-    { ariaLabel: 'Course' });
+    { ariaLabel: 'Maze size' });
 
   const scoreRow = statRow([
     { key: 'level', label: 'Maze', value: '1', tone: 'x' },
@@ -891,7 +896,7 @@ function mountMaze(ctx) {
       level += 1;
       audio.play('match');
       loadLevel();
-      ctx.setStatus(`Maze ${level + 1} of ${course.levels.length} — keep going`);
+      ctx.setStatus(`${whereAmI()} — keep going`);
       return;
     }
 
@@ -949,7 +954,7 @@ function mountMaze(ctx) {
     if (!renderer && !flat) return;     // still loading
     if (renderer) view.replaceChildren(renderer.domElement, minimap);
     resize();
-    ctx.setStatus(`Maze 1 of ${course.levels.length} — find the way out`);
+    ctx.setStatus(`${whereAmI()} — find the way out`);
     start();
   }
 
@@ -998,7 +1003,7 @@ function mountMaze(ctx) {
     if (courseDone) return;
     ctx.setStatus(mouseLook
       ? 'Mouse look on — Esc to leave fullscreen'
-      : `Maze ${level + 1} of ${course.levels.length} — find the way out`);
+      : `${whereAmI()} — find the way out`);
   }
 
   function onMouseMove(event) {
