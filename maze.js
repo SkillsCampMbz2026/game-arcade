@@ -10,6 +10,7 @@
    outside a browser; only mountMaze touches three.js or the DOM. */
 
 const THREE_SRC = 'vendor/three.min.js';
+const BRICK_TEX = 256;   // texture edge, in pixels
 
 /* Pick a size and you get a run of three mazes at that scale, each a little
    bigger than the last. Escaping one drops you straight into the next; the
@@ -86,13 +87,36 @@ function buildMaze(cols, rows, rng = Math.random) {
 const isWall = (maze, x, y) =>
   x < 0 || y < 0 || x >= maze.w || y >= maze.h || maze.grid[y * maze.w + x] === 1;
 
-// Breadth-first shortest route between two grid squares, or null.
-function solveMaze(maze, from = maze.start, to = maze.exit) {
-  const seen = new Int32Array(maze.w * maze.h).fill(-1);
-  const queue = [from.y * maze.w + from.x];
-  seen[queue[0]] = queue[0];
+/* Breadth-first shortest route between two grid squares, or null.
 
-  for (let head = 0; head < queue.length; head++) {
+   The monster re-runs this several times a second on grids of up to 11,000
+   squares, so the working arrays are allocated once and reused. A visited mark
+   is a generation stamp rather than a cleared flag, which means no 11,000-entry
+   clear per call either — the cost is proportional to the squares actually
+   reached, not to the size of the maze. */
+let solveScratch = null;
+
+function solveMaze(maze, from = maze.start, to = maze.exit) {
+  const size = maze.w * maze.h;
+  if (!solveScratch || solveScratch.came.length < size) {
+    solveScratch = {
+      came: new Int32Array(size),
+      stamp: new Int32Array(size),
+      queue: new Int32Array(size),
+      gen: 0,
+    };
+  }
+
+  const { came, stamp, queue } = solveScratch;
+  const gen = ++solveScratch.gen;
+  const start = from.y * maze.w + from.x;
+
+  queue[0] = start;
+  came[start] = start;
+  stamp[start] = gen;
+  let tail = 1;
+
+  for (let head = 0; head < tail; head++) {
     const index = queue[head];
     const x = index % maze.w;
     const y = (index - x) / maze.w;
@@ -100,9 +124,9 @@ function solveMaze(maze, from = maze.start, to = maze.exit) {
     if (x === to.x && y === to.y) {
       const path = [];
       let step = index;
-      while (step !== seen[step]) {
+      while (step !== came[step]) {
         path.push({ x: step % maze.w, y: (step - (step % maze.w)) / maze.w });
-        step = seen[step];
+        step = came[step];
       }
       path.push({ ...from });
       return path.reverse();
@@ -113,9 +137,10 @@ function solveMaze(maze, from = maze.start, to = maze.exit) {
       const ny = y + dy;
       if (isWall(maze, nx, ny)) continue;
       const next = ny * maze.w + nx;
-      if (seen[next] !== -1) continue;
-      seen[next] = index;
-      queue.push(next);
+      if (stamp[next] === gen) continue;
+      stamp[next] = gen;
+      came[next] = index;
+      queue[tail++] = next;
     }
   }
 
@@ -132,7 +157,17 @@ function solveMaze(maze, from = maze.start, to = maze.exit) {
    leaves at least one way out of the start square. */
 const HEADINGS = [[1, 0, 0], [0, 1, Math.PI / 2], [-1, 0, Math.PI], [0, -1, -Math.PI / 2]];
 
-const cellKey = (x, y) => `${Math.floor(x)},${Math.floor(y)}`;
+/* A trail entry, as a single number rather than an "x,y" string.
+
+   The minimap repaints the whole trail every frame, and by the end of a large
+   run that is well over a thousand squares. Decoding a string key per square
+   per frame meant a split, a map and two Number conversions each time — tens of
+   thousands of throwaway arrays a second, which the collector then has to mop
+   up mid-game. The widest grid is 105 squares across, so 128 leaves room. */
+const MAZE_STRIDE = 128;
+const cellKey = (x, y) => Math.floor(y) * MAZE_STRIDE + Math.floor(x);
+const keyX = (key) => key % MAZE_STRIDE;
+const keyY = (key) => (key - (key % MAZE_STRIDE)) / MAZE_STRIDE;
 
 function createWalker(maze) {
   const open = HEADINGS.find(([dx, dy]) => !isWall(maze, maze.start.x + dx, maze.start.y + dy));
@@ -220,6 +255,9 @@ const MONSTER_REPATH = 0.35;     // seconds between route recalculations
 const CATCH_RADIUS = 0.45;       // cells
 const MONSTER_MIN_START = 8;     // squares of head start, at least
 
+// The minimap is repainted this often rather than every frame.
+const MINIMAP_PERIOD = 1 / 18;
+
 function createMonster(maze, walker, rng = Math.random) {
   // Spawn as far away as the maze allows, but never on the exit — being made
   // to walk into the monster to finish would not be a fair maze.
@@ -250,7 +288,8 @@ function stepMonster(maze, monster, walker, dt) {
   if (monster.caught || walker.escaped) return monster;
 
   monster.sinceRepath += dt;
-  if (monster.sinceRepath >= MONSTER_REPATH || monster.path.length === 0) {
+  if (monster.sinceRepath >= MONSTER_REPATH
+    || (monster.path.length === 0 && monster.sinceRepath >= MONSTER_REPATH * 0.25)) {
     monster.sinceRepath = 0;
     const route = solveMaze(
       maze,
@@ -309,9 +348,9 @@ function drawMinimap(g, maze, walker, size, monster) {
 
   // Where you have been.
   g.fillStyle = 'rgba(148, 197, 255, 0.55)';
+  const box = Math.max(1, cell);
   for (const key of walker.trail || []) {
-    const [x, y] = key.split(',').map(Number);
-    g.fillRect(x * cell, y * cell, Math.max(1, cell), Math.max(1, cell));
+    g.fillRect(keyX(key) * cell, keyY(key) * cell, box, box);
   }
 
   // The exit.
@@ -365,7 +404,9 @@ function drawCreature(g, cx, feet, wide, tall, distance, depth, width) {
   const right = Math.ceil(cx + wide / 2);
   const top = feet - tall;
   const capH = tall * 0.33;
-  const fade = Math.max(0.25, 1 - distance / 16);
+  // Solid until it is some way off, then fading into the haze. Thinning it out
+  // at close range let the brickwork behind show straight through it.
+  const fade = distance < 6 ? 1 : Math.max(0.3, 1 - (distance - 6) / 14);
 
   // Only the columns that are nearer than the wall behind them get drawn.
   for (let x = left; x <= right; x++) {
@@ -506,8 +547,10 @@ function drawRaycast(g, maze, walker, pitch, width, height, monster) {
      camera. Drawn before the walls, which paint over whatever runs past them. */
   // Half-cell slabs, matching the 3D floor. Whole-cell ones put every grout
   // line under a wall in a one-cell-wide corridor, leaving the floor bare.
+  // The reach is short because fog and walls hide anything further anyway,
+  // and every extra ring costs two whole polylines a frame.
   const TILE = 0.5;
-  const REACH = 30;
+  const REACH = 16;
   const originX = Math.floor(walker.x / TILE) * TILE;
   const originY = Math.floor(walker.y / TILE) * TILE;
   g.strokeStyle = 'rgba(214, 226, 244, 0.13)';
@@ -530,7 +573,16 @@ function drawRaycast(g, maze, walker, pitch, width, height, monster) {
 
   const depth = new Float64Array(width);
 
-  for (let x = 0; x < width; x++) {
+  /* Cast one ray every COLUMN_STEP pixels and fill that many pixels wide.
+     Wall slices are vertical, so a two-pixel granularity on their edges is
+     invisible, while halving the column count halves both the ray marching and
+     — far more importantly — the number of fill calls the canvas has to
+     service. At full width this loop was issuing tens of thousands of fills a
+     frame, which no 2D canvas keeps up with. */
+  const COLUMN_STEP = width > 1100 ? 3 : 2;
+  const slab = brickSlab();
+
+  for (let x = 0; x < width; x += COLUMN_STEP) {
     const cameraX = (2 * x) / width - 1;
     const rayX = dirX + planeX * cameraX;
     const rayY = dirY + planeY * cameraX;
@@ -560,7 +612,9 @@ function drawRaycast(g, maze, walker, pitch, width, height, monster) {
     }
 
     const distance = Math.max(0.0001, hitVertical ? sideX - deltaX : sideY - deltaY);
-    depth[x] = distance;
+    // Every pixel this ray stands for shares its depth, so the billboards
+    // further down can still test any column they touch.
+    for (let c = x; c < x + COLUMN_STEP && c < width; c++) depth[c] = distance;
 
     const top = horizon - ((WALL_HEIGHT - EYE_HEIGHT) / distance) * project;
     const bottom = horizon + (EYE_HEIGHT / distance) * project;
@@ -575,85 +629,44 @@ function drawRaycast(g, maze, walker, pitch, width, height, monster) {
        corner read as a corner. */
     const fade = Math.min(1, distance / 22);
     const side = hitVertical ? 1 : 0.78;
-    const tone = (light, nudge) => {
-      const base = (light ? 214 : 178) + nudge;
-      const v = Math.round(base * side * (1 - fade) + 150 * fade);
-      const b = Math.round(v * 0.98 + 12 * fade);
-      return `rgb(${v}, ${v}, ${Math.min(255, b + 4)})`;
-    };
 
     let wallX = hitVertical ? walker.y + distance * rayY : walker.x + distance * rayX;
     wallX -= Math.floor(wallX);
 
-    const courses = 8;
-    const courseH = (bottom - top) / courses;
-    // Joint widths are capped in pixels: a course seen up close is thousands
-    // of pixels tall, and a percentage of that paints fat grey bands.
-    const joint = Math.min(2.5, Math.max(0.8, courseH * 0.09));
-    const near = Math.max(0, 1 - distance / 11);
+    const slice = Math.max(1, bottom - top + 1);
 
-    for (let c = 0; c < courses; c++) {
-      const yTop = top + c * courseH;
-      /* Two bricks across each cell face, every other course shifted by half
-         a brick. The shift has to be half a BRICK (0.5 here), not half a cell
-         — offset by a whole brick and the stagger cancels the course step,
-         leaving vertical stripes instead of a bond. */
-      const along = wallX * 2 + (c % 2) * 0.5;
-      const brick = Math.floor(along);
-
-      // Every brick a few points off its neighbours, from a fixed hash, so a
-      // long run of wall does not read as one flat panel.
-      const seed = ((brick * 73856093) ^ (c * 19349663) ^ (mapX * 83492791) ^ (mapY * 2654435761)) >>> 0;
-      const nudge = (seed % 21) - 10;
-      g.fillStyle = tone(((brick + c) % 2 + 2) % 2 === 0, nudge);
-      g.fillRect(x, yTop, 1, Math.max(1, courseH + 1));
-
-      if (courseH > 3) {
-        // Bevel: the light catches the top of every brick, the bottom is in
-        // its own shadow. This is most of what makes brickwork read as brick.
-        g.fillStyle = `rgba(255, 255, 255, ${0.3 * near})`;
-        g.fillRect(x, yTop + joint, 1, Math.max(1, joint * 0.6));
-        g.fillStyle = `rgba(74, 82, 92, ${0.32 * near})`;
-        g.fillRect(x, yTop + courseH - joint, 1, Math.max(1, joint));
-      }
-
-      // Mortar: the horizontal bed joint, and the vertical perpend wherever
-      // this column happens to land on the end of a brick.
-      g.fillStyle = `rgba(96, 102, 110, ${0.75 * near})`;
-      if (c > 0) g.fillRect(x, yTop, 1, joint);
-      const acrossJoint = Math.min(along - brick, 1 - (along - brick));
-      if (acrossJoint * 2 * (bottom - top) / courses < joint * 0.5) {
-        g.fillRect(x, yTop, 1, Math.max(1, courseH));
-      }
+    /* One textured slice per column. The brick canvas already carries the
+       bond, the joints, the bevels, the flecks and the contact shadow at the
+       foot of the wall, all baked in — so this single call replaces the forty
+       fills that painting each of those separately used to take. */
+    if (slab) {
+      const sx = Math.min(BRICK_TEX - 1, Math.floor(wallX * BRICK_TEX));
+      g.drawImage(slab, sx, 0, 1, BRICK_TEX, x, top, COLUMN_STEP, slice);
+    } else {
+      // No offscreen canvas to slice: plain tone, so the maze still draws.
+      const v = Math.round(206 * side * (1 - fade) + 150 * fade);
+      g.fillStyle = `rgb(${v}, ${v}, ${Math.min(255, v + 6)})`;
+      g.fillRect(x, top, COLUMN_STEP, slice);
     }
 
-    if (distance < 9) {
-      // Tiny white flecks, from a fixed hash so they sit still on the wall.
-      const grain = ((Math.floor(wallX * 64) * 73856093) ^ (mapX * 19349663) ^ (mapY * 83492791)) >>> 0;
-      if (grain % 4 === 0) {
-        g.fillStyle = `rgba(255, 255, 255, ${0.5 * (1 - distance / 9)})`;
-        g.fillRect(x, top + ((grain >> 8) % Math.max(1, Math.floor(bottom - top))), 1, 1);
-      }
+    /* Shading goes on as overlays, which is why the texture is painted at full
+       brightness. Faces along one axis are darkened so corners stay legible,
+       and everything washes toward the dusk haze with distance rather than
+       toward black — nothing should look lit from within. */
+    if (!hitVertical) {
+      g.fillStyle = `rgba(28, 34, 46, ${(1 - side) * (1 - fade)})`;
+      g.fillRect(x, top, COLUMN_STEP, slice);
     }
-
-    /* Contact shading. Darkening the very top and bottom of each slice reads
-       as the wall meeting the floor and the sky, and darkening the edge of a
-       face where it meets the next one picks out the corners — both are cheap
-       stand-ins for ambient occlusion and do a lot for the sense of depth. */
-    const slice = bottom - top;
-    if (slice > 6) {
-      const contact = Math.min(14, slice * 0.06);
-      g.fillStyle = 'rgba(30, 36, 46, 0.32)';
-      g.fillRect(x, bottom - contact, 1, contact);
-      g.fillStyle = 'rgba(30, 36, 46, 0.16)';
-      g.fillRect(x, top, 1, Math.max(1, contact * 0.5));
+    if (fade > 0.02) {
+      g.fillStyle = `rgba(150, 152, 158, ${fade * 0.85})`;
+      g.fillRect(x, top, COLUMN_STEP, slice);
     }
 
     // Near the edge of a wall face, deepen the shade so corners stand out.
     const edge = Math.min(wallX, 1 - wallX);
     if (edge < 0.04) {
-      g.fillStyle = `rgba(28, 34, 44, ${0.16 * (1 - edge / 0.04)})`;
-      g.fillRect(x, top, 1, Math.max(1, slice));
+      g.fillStyle = `rgba(28, 34, 44, ${0.2 * (1 - edge / 0.04) * (1 - fade)})`;
+      g.fillRect(x, top, COLUMN_STEP, slice);
     }
 
   }
@@ -741,205 +754,239 @@ function paintCanvas(size, draw) {
   return texture;
 }
 
+// A deterministic speckle, so bricks and tiles have grain without needing a
+// photograph. Same input always gives the same dots.
+const speckle = (g, x, y, w, h, count, alpha) => {
+  g.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+  let n = ((x * 73856093) ^ (y * 19349663)) >>> 0;
+  for (let i = 0; i < count; i++) {
+    n = (n * 1664525 + 1013904223) >>> 0;
+    const px = x + (n % w);
+    const py = y + ((n >> 9) % h);
+    g.fillRect(px, py, 1, 1);
+  }
+};
+
+// A deterministic 0..1 per position, for per-brick and per-tile variation.
+const jitter = (a, b) => {
+  let n = (((a + 1) * 374761393) ^ ((b + 1) * 668265263)) >>> 0;
+  n = (n ^ (n >>> 13)) * 1274126177 >>> 0;
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+};
+
+/* Brick: rectangles alternating between off-white and light grey, flecked
+   with tiny white dots.
+
+   The texture maps once over the full height of a wall, not tiled, so the
+   shading baked in at the bottom lands where the wall meets the floor. That
+   contact shadow is what stops corridors looking like flat cardboard, and it
+   costs nothing at runtime — no lights, no shadow maps. */
+function paintBrick(g, size) {
+  const rows = 8;
+  const cols = 4;
+  const brickH = size / rows;
+  const brickW = size / cols;
+
+  g.fillStyle = '#8b9198';                       // mortar
+  g.fillRect(0, 0, size, size);
+  speckle(g, 0, 0, size, size, 400, 0.12);
+
+  for (let row = 0; row < rows; row++) {
+    const offset = (row % 2) * 0.5;
+    for (let i = -1; i < cols + 1; i++) {
+      const x = Math.round((i + offset) * brickW);
+      const y = Math.round(row * brickH);
+      const w = Math.round(brickW) - 3;
+      const h = Math.round(brickH) - 3;
+
+      // Alternate the two tones in a running bond, then nudge each brick a
+      // few points either way so no two neighbours are exactly equal.
+      const offWhite = (row + i) % 2 === 0;
+      const base = offWhite ? 233 : 194;
+      const tone = Math.round(base + (jitter(row, i) - 0.5) * 22);
+      g.fillStyle = `rgb(${tone}, ${tone + 2}, ${tone + 6})`;
+      g.fillRect(x + 2, y + 2, w, h);
+
+      speckle(g, x + 2, y + 2, Math.max(1, w), Math.max(1, h), 16, offWhite ? 0.85 : 0.6);
+
+      // Bevel: light along the top and left, shadow along the bottom edge.
+      g.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      g.fillRect(x + 2, y + 2, w, 1);
+      g.fillRect(x + 2, y + 2, 1, h);
+      g.fillStyle = 'rgba(80, 88, 96, 0.28)';
+      g.fillRect(x + 2, y + h + 1, w, 1);
+      g.fillRect(x + w + 1, y + 2, 1, h);
+    }
+  }
+
+  // Baked shading: dark where the wall meets the floor, a touch of shade up
+  // under the capstone, and a wash of grime low down.
+  const foot = g.createLinearGradient(0, size * 0.62, 0, size);
+  foot.addColorStop(0, 'rgba(24, 30, 40, 0)');
+  foot.addColorStop(1, 'rgba(24, 30, 40, 0.42)');
+  g.fillStyle = foot;
+  g.fillRect(0, size * 0.62, size, size * 0.38);
+
+  const head = g.createLinearGradient(0, 0, 0, size * 0.12);
+  head.addColorStop(0, 'rgba(40, 46, 56, 0.3)');
+  head.addColorStop(1, 'rgba(40, 46, 56, 0)');
+  g.fillStyle = head;
+  g.fillRect(0, 0, size, size * 0.12);
+}
+
+// Capstone for the wall tops, which are on show with no ceiling.
+function paintCap(g, size) {
+  g.fillStyle = '#d5d7d4';
+  g.fillRect(0, 0, size, size);
+  speckle(g, 0, 0, size, size, 90, 0.7);
+  // A weathered edge all the way round, so the tops read as capped stone
+  // rather than as the cubes being cut off.
+  g.fillStyle = 'rgba(110, 118, 126, 0.32)';
+  g.fillRect(0, 0, size, 3);
+  g.fillRect(0, size - 3, size, 3);
+  g.fillRect(0, 0, 3, size);
+  g.fillRect(size - 3, 0, 3, size);
+  g.fillStyle = 'rgba(255, 255, 255, 0.3)';
+  g.fillRect(3, 3, size - 6, 1);
+}
+
+// Floor: dark grey square tiles, also flecked with white.
+function paintFloor(g, size) {
+  const cells = 4;
+  const step = size / cells;
+
+  g.fillStyle = '#101318';                       // grout
+  g.fillRect(0, 0, size, size);
+  speckle(g, 0, 0, size, size, 300, 0.08);
+
+  for (let ty = 0; ty < cells; ty++) {
+    for (let tx = 0; tx < cells; tx++) {
+      const x = tx * step + 2;
+      const y = ty * step + 2;
+      const w = step - 4;
+      const shade = 54 + ((tx + ty) % 2) * 7 + Math.round(jitter(tx, ty) * 8);
+      g.fillStyle = `rgb(${shade}, ${shade + 2}, ${shade + 5})`;
+      g.fillRect(x, y, w, w);
+      speckle(g, x, y, w, w, 26, 0.5);
+
+      // Each slab catches a little light along its top-left corner.
+      g.fillStyle = 'rgba(226, 232, 240, 0.1)';
+      g.fillRect(x, y, w, 1);
+      g.fillRect(x, y, 1, w);
+      g.fillStyle = 'rgba(6, 9, 14, 0.35)';
+      g.fillRect(x, y + w - 1, w, 1);
+      g.fillRect(x + w - 1, y, 1, w);
+    }
+  }
+}
+
+/* Dusk: the light is still up, but night is coming. Deep blue overhead
+   warming through to a golden horizon, with only the first few stars high
+   up rather than a full night sky. */
+function paintSky(g, size) {
+  const grad = g.createLinearGradient(0, 0, 0, size);
+  grad.addColorStop(0, '#2f568f');
+  grad.addColorStop(0.34, '#6d9ad0');
+  grad.addColorStop(0.62, '#b9cfe2');
+  grad.addColorStop(0.82, '#f0c48a');
+  grad.addColorStop(1, '#f6a86a');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, size, size);
+
+  // Early stars only, and only in the darker upper band.
+  let n = 987654321;
+  for (let i = 0; i < 90; i++) {
+    n = (n * 1664525 + 1013904223) >>> 0;
+    const x = n % size;
+    const y = (n >> 7) % Math.floor(size * 0.3);
+    const bright = 0.2 + ((n >> 20) % 45) / 100;
+    g.fillStyle = `rgba(255, 255, 255, ${bright})`;
+    g.fillRect(x, y, 1, 1);
+  }
+
+  // The sun just going down, low enough to sit near the horizon.
+  const sunX = size * 0.7;
+  const sunY = size * 0.8;
+  const glow = g.createRadialGradient(sunX, sunY, 6, sunX, sunY, 130);
+  glow.addColorStop(0, 'rgba(255, 226, 170, 0.65)');
+  glow.addColorStop(1, 'rgba(255, 226, 170, 0)');
+  g.fillStyle = glow;
+  g.fillRect(sunX - 135, sunY - 135, 270, 270);
+
+  /* Cloud bands across the middle of the sky, lit warm from below by the
+     setting sun and cool on top. Flat gradients, no sprites — an empty
+     gradient sky is the one thing that gives a dome away as a dome. */
+  let c = 24680;
+  for (let i = 0; i < 16; i++) {
+    c = (c * 1664525 + 1013904223) >>> 0;
+    const cx = (c % size);
+    const cy = size * 0.4 + ((c >> 8) % Math.floor(size * 0.4));
+    const cw = 40 + ((c >> 16) % 90);
+    const warmth = Math.min(1, Math.max(0, (cy / size - 0.4) / 0.4));
+
+    const band = g.createLinearGradient(0, cy - cw * 0.16, 0, cy + cw * 0.16);
+    band.addColorStop(0, `rgba(232, 240, 252, ${0.16 + warmth * 0.1})`);
+    band.addColorStop(1, `rgba(255, ${Math.round(214 + warmth * 30)}, 176, ${0.1 + warmth * 0.24})`);
+    g.fillStyle = band;
+
+    /* Built from several unequal lobes in a single path: one ellipse reads
+       as a lozenge, five overlapping ones read as cloud. Single path so the
+       overlaps do not double-composite into visible seams. */
+    g.beginPath();
+    for (let lobe = 0; lobe < 5; lobe++) {
+      c = (c * 1664525 + 1013904223) >>> 0;
+      const ox = (lobe / 4 - 0.5) * cw * 1.6;
+      const oy = ((c >> 4) % 9) - 4;
+      const rx = cw * (0.3 + ((c >> 12) % 30) / 100);
+      const ry = rx * (0.16 + ((c >> 22) % 14) / 100);
+      g.moveTo(cx + ox + rx, cy + oy);
+      g.ellipse(cx + ox, cy + oy, rx, ry, 0, 0, Math.PI * 2);
+    }
+    g.fill();
+  }
+}
+
+/* Wrapped as three.js textures for the WebGL scene. */
 function makeTextures() {
   if (textures) return textures;
 
-  // A deterministic speckle, so bricks and tiles have grain without needing a
-  // photograph. Same input always gives the same dots.
-  const speckle = (g, x, y, w, h, count, alpha) => {
-    g.fillStyle = `rgba(255, 255, 255, ${alpha})`;
-    let n = ((x * 73856093) ^ (y * 19349663)) >>> 0;
-    for (let i = 0; i < count; i++) {
-      n = (n * 1664525 + 1013904223) >>> 0;
-      const px = x + (n % w);
-      const py = y + ((n >> 9) % h);
-      g.fillRect(px, py, 1, 1);
-    }
-  };
-
-  // A deterministic 0..1 per position, for per-brick and per-tile variation.
-  const jitter = (a, b) => {
-    let n = (((a + 1) * 374761393) ^ ((b + 1) * 668265263)) >>> 0;
-    n = (n ^ (n >>> 13)) * 1274126177 >>> 0;
-    return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
-  };
-
-  /* Brick: rectangles alternating between off-white and light grey, flecked
-     with tiny white dots.
-
-     The texture maps once over the full height of a wall, not tiled, so the
-     shading baked in at the bottom lands where the wall meets the floor. That
-     contact shadow is what stops corridors looking like flat cardboard, and it
-     costs nothing at runtime — no lights, no shadow maps. */
-  const brick = paintCanvas(256, (g, size) => {
-    const rows = 8;
-    const cols = 4;
-    const brickH = size / rows;
-    const brickW = size / cols;
-
-    g.fillStyle = '#8b9198';                       // mortar
-    g.fillRect(0, 0, size, size);
-    speckle(g, 0, 0, size, size, 400, 0.12);
-
-    for (let row = 0; row < rows; row++) {
-      const offset = (row % 2) * 0.5;
-      for (let i = -1; i < cols + 1; i++) {
-        const x = Math.round((i + offset) * brickW);
-        const y = Math.round(row * brickH);
-        const w = Math.round(brickW) - 3;
-        const h = Math.round(brickH) - 3;
-
-        // Alternate the two tones in a running bond, then nudge each brick a
-        // few points either way so no two neighbours are exactly equal.
-        const offWhite = (row + i) % 2 === 0;
-        const base = offWhite ? 233 : 194;
-        const tone = Math.round(base + (jitter(row, i) - 0.5) * 22);
-        g.fillStyle = `rgb(${tone}, ${tone + 2}, ${tone + 6})`;
-        g.fillRect(x + 2, y + 2, w, h);
-
-        speckle(g, x + 2, y + 2, Math.max(1, w), Math.max(1, h), 16, offWhite ? 0.85 : 0.6);
-
-        // Bevel: light along the top and left, shadow along the bottom edge.
-        g.fillStyle = 'rgba(255, 255, 255, 0.4)';
-        g.fillRect(x + 2, y + 2, w, 1);
-        g.fillRect(x + 2, y + 2, 1, h);
-        g.fillStyle = 'rgba(80, 88, 96, 0.28)';
-        g.fillRect(x + 2, y + h + 1, w, 1);
-        g.fillRect(x + w + 1, y + 2, 1, h);
-      }
-    }
-
-    // Baked shading: dark where the wall meets the floor, a touch of shade up
-    // under the capstone, and a wash of grime low down.
-    const foot = g.createLinearGradient(0, size * 0.62, 0, size);
-    foot.addColorStop(0, 'rgba(24, 30, 40, 0)');
-    foot.addColorStop(1, 'rgba(24, 30, 40, 0.42)');
-    g.fillStyle = foot;
-    g.fillRect(0, size * 0.62, size, size * 0.38);
-
-    const head = g.createLinearGradient(0, 0, 0, size * 0.12);
-    head.addColorStop(0, 'rgba(40, 46, 56, 0.3)');
-    head.addColorStop(1, 'rgba(40, 46, 56, 0)');
-    g.fillStyle = head;
-    g.fillRect(0, 0, size, size * 0.12);
-  });
-
-  // Capstone for the wall tops, which are on show with no ceiling.
-  const cap = paintCanvas(64, (g, size) => {
-    g.fillStyle = '#d5d7d4';
-    g.fillRect(0, 0, size, size);
-    speckle(g, 0, 0, size, size, 90, 0.7);
-    // A weathered edge all the way round, so the tops read as capped stone
-    // rather than as the cubes being cut off.
-    g.fillStyle = 'rgba(110, 118, 126, 0.32)';
-    g.fillRect(0, 0, size, 3);
-    g.fillRect(0, size - 3, size, 3);
-    g.fillRect(0, 0, 3, size);
-    g.fillRect(size - 3, 0, 3, size);
-    g.fillStyle = 'rgba(255, 255, 255, 0.3)';
-    g.fillRect(3, 3, size - 6, 1);
-  });
-
-  // Floor: dark grey square tiles, also flecked with white.
-  const floor = paintCanvas(256, (g, size) => {
-    const cells = 4;
-    const step = size / cells;
-
-    g.fillStyle = '#101318';                       // grout
-    g.fillRect(0, 0, size, size);
-    speckle(g, 0, 0, size, size, 300, 0.08);
-
-    for (let ty = 0; ty < cells; ty++) {
-      for (let tx = 0; tx < cells; tx++) {
-        const x = tx * step + 2;
-        const y = ty * step + 2;
-        const w = step - 4;
-        const shade = 54 + ((tx + ty) % 2) * 7 + Math.round(jitter(tx, ty) * 8);
-        g.fillStyle = `rgb(${shade}, ${shade + 2}, ${shade + 5})`;
-        g.fillRect(x, y, w, w);
-        speckle(g, x, y, w, w, 26, 0.5);
-
-        // Each slab catches a little light along its top-left corner.
-        g.fillStyle = 'rgba(226, 232, 240, 0.1)';
-        g.fillRect(x, y, w, 1);
-        g.fillRect(x, y, 1, w);
-        g.fillStyle = 'rgba(6, 9, 14, 0.35)';
-        g.fillRect(x, y + w - 1, w, 1);
-        g.fillRect(x + w - 1, y, 1, w);
-      }
-    }
-  });
-
-  /* Dusk: the light is still up, but night is coming. Deep blue overhead
-     warming through to a golden horizon, with only the first few stars high
-     up rather than a full night sky. */
-  const sky = paintCanvas(512, (g, size) => {
-    const grad = g.createLinearGradient(0, 0, 0, size);
-    grad.addColorStop(0, '#2f568f');
-    grad.addColorStop(0.34, '#6d9ad0');
-    grad.addColorStop(0.62, '#b9cfe2');
-    grad.addColorStop(0.82, '#f0c48a');
-    grad.addColorStop(1, '#f6a86a');
-    g.fillStyle = grad;
-    g.fillRect(0, 0, size, size);
-
-    // Early stars only, and only in the darker upper band.
-    let n = 987654321;
-    for (let i = 0; i < 90; i++) {
-      n = (n * 1664525 + 1013904223) >>> 0;
-      const x = n % size;
-      const y = (n >> 7) % Math.floor(size * 0.3);
-      const bright = 0.2 + ((n >> 20) % 45) / 100;
-      g.fillStyle = `rgba(255, 255, 255, ${bright})`;
-      g.fillRect(x, y, 1, 1);
-    }
-
-    // The sun just going down, low enough to sit near the horizon.
-    const sunX = size * 0.7;
-    const sunY = size * 0.8;
-    const glow = g.createRadialGradient(sunX, sunY, 6, sunX, sunY, 130);
-    glow.addColorStop(0, 'rgba(255, 226, 170, 0.65)');
-    glow.addColorStop(1, 'rgba(255, 226, 170, 0)');
-    g.fillStyle = glow;
-    g.fillRect(sunX - 135, sunY - 135, 270, 270);
-
-    /* Cloud bands across the middle of the sky, lit warm from below by the
-       setting sun and cool on top. Flat gradients, no sprites — an empty
-       gradient sky is the one thing that gives a dome away as a dome. */
-    let c = 24680;
-    for (let i = 0; i < 16; i++) {
-      c = (c * 1664525 + 1013904223) >>> 0;
-      const cx = (c % size);
-      const cy = size * 0.4 + ((c >> 8) % Math.floor(size * 0.4));
-      const cw = 40 + ((c >> 16) % 90);
-      const warmth = Math.min(1, Math.max(0, (cy / size - 0.4) / 0.4));
-
-      const band = g.createLinearGradient(0, cy - cw * 0.16, 0, cy + cw * 0.16);
-      band.addColorStop(0, `rgba(232, 240, 252, ${0.16 + warmth * 0.1})`);
-      band.addColorStop(1, `rgba(255, ${Math.round(214 + warmth * 30)}, 176, ${0.1 + warmth * 0.24})`);
-      g.fillStyle = band;
-
-      /* Built from several unequal lobes in a single path: one ellipse reads
-         as a lozenge, five overlapping ones read as cloud. Single path so the
-         overlaps do not double-composite into visible seams. */
-      g.beginPath();
-      for (let lobe = 0; lobe < 5; lobe++) {
-        c = (c * 1664525 + 1013904223) >>> 0;
-        const ox = (lobe / 4 - 0.5) * cw * 1.6;
-        const oy = ((c >> 4) % 9) - 4;
-        const rx = cw * (0.3 + ((c >> 12) % 30) / 100);
-        const ry = rx * (0.16 + ((c >> 22) % 14) / 100);
-        g.moveTo(cx + ox + rx, cy + oy);
-        g.ellipse(cx + ox, cy + oy, rx, ry, 0, 0, Math.PI * 2);
-      }
-      g.fill();
-    }
-  });
+  const brick = paintCanvas(256, paintBrick);
+  const cap = paintCanvas(64, paintCap);
+  const floor = paintCanvas(256, paintFloor);
+  const sky = paintCanvas(512, paintSky);
   sky.wrapS = THREE.ClampToEdgeWrapping;
   sky.wrapT = THREE.ClampToEdgeWrapping;
 
   textures = { brick, cap, floor, sky };
   return textures;
+}
+
+/* The same brickwork on a plain canvas, for the 2D fallback to cut column
+   slices out of with drawImage.
+
+   Painting a wall slice feature by feature — bond, bed joint, two bevels,
+   perpend, contact shading — came to forty fill calls per screen column, which
+   is tens of thousands a frame and more than a 2D canvas will service at sixty
+   frames a second. One textured slice per column replaces the lot, and carries
+   more detail than the hand-drawn version did. */
+let flatSkin = null;
+
+function brickSlab() {
+  if (flatSkin !== null) return flatSkin;
+  flatSkin = false;
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = BRICK_TEX;
+    canvas.height = BRICK_TEX;
+    const g = canvas.getContext('2d');
+    if (g) {
+      paintBrick(g, BRICK_TEX);
+      flatSkin = canvas;
+    }
+  } catch {
+    flatSkin = false;   // no 2D canvas available; callers fall back to flat tone
+  }
+  return flatSkin;
 }
 
 /* Is WebGL usable? Answered once and remembered.
@@ -983,6 +1030,7 @@ function mountMaze(ctx) {
   let stalker = null;
   let caught = false;
   let footfall = 0;
+  let mapAge = MINIMAP_PERIOD;   // draw on the first frame
   const lastFoot = { x: null, y: null };
   let scene = null;
   let camera = null;
@@ -1235,8 +1283,10 @@ function mountMaze(ctx) {
   }
 
   function startRenderer() {
-    renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    // Multisampling is the first thing to go: at this pixel count it costs
+    // more than it returns, and the walls are flat colour with no thin
+    // geometry for the jaggies to show on.
+    renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
     resize();
     view.append(renderer.domElement);
     window.addEventListener('resize', resize);
@@ -1251,18 +1301,36 @@ function mountMaze(ctx) {
     return { full, width, height };
   }
 
+  /* Both renderers draw into a buffer no bigger than this and let CSS stretch
+     it to fit. Fullscreen on a large display is otherwise several times the
+     pixels of the windowed view — the raycaster's cost is per pixel drawn, and
+     the WebGL one still has to shade every one of them. Slight softness in
+     fullscreen is a far better trade than a halved frame rate. */
+  const MAX_FLAT_WIDTH = 1100;
+  const MAX_GL_PIXELS = 2.4e6;
+
   function resize() {
     const { full, width, height } = viewportSize();
 
     if (flatCanvas) {
-      flatCanvas.width = width;
-      flatCanvas.height = height;
+      const scale = Math.min(1, MAX_FLAT_WIDTH / width);
+      flatCanvas.width = Math.round(width * scale);
+      flatCanvas.height = Math.round(height * scale);
       flatCanvas.style.width = '100%';
       flatCanvas.style.height = full ? '100%' : 'auto';
       return;
     }
 
     if (!renderer || !camera) return;
+
+    /* Pixel ratio from a budget rather than straight from the device. A 2x
+       ratio on a fullscreen 1440p panel is fifteen million pixels a frame,
+       which is what turns a smooth maze into a slideshow on integrated
+       graphics — and the difference is barely visible at this scale. */
+    const device = Math.min(2, window.devicePixelRatio || 1);
+    const budget = Math.sqrt(MAX_GL_PIXELS / Math.max(1, width * height));
+    renderer.setPixelRatio(Math.max(0.75, Math.min(device, budget)));
+
     renderer.setSize(width, height, false);
     renderer.domElement.style.width = '100%';
     renderer.domElement.style.height = full ? '100%' : 'auto';
@@ -1325,7 +1393,11 @@ function mountMaze(ctx) {
       renderer.render(scene, camera);
     }
 
-    drawMinimap(map2d, maze, walker, MINIMAP_PX, monster);
+    mapAge += dt;
+    if (mapAge >= MINIMAP_PERIOD) {
+      mapAge = 0;
+      drawMinimap(map2d, maze, walker, MINIMAP_PX, monster);
+    }
     scoreRow.set('time', clock(seconds));
 
     // Proximity drone, and a footstep every so often as you cover ground.
@@ -1555,7 +1627,7 @@ if (typeof module !== 'undefined') {
   module.exports = {
     buildMaze, solveMaze, isWall, createWalker, stepWalker, moveWalker,
     MAZE_COURSES, courseById, WALKER_RADIUS, WALK_SPEED, TURN_SPEED, SPRINT_MULTIPLIER,
-    drawRaycast, drawMinimap, cellKey, MAZE_FOV, WALL_HEIGHT, EYE_HEIGHT,
+    drawRaycast, drawMinimap, cellKey, keyX, keyY, MAZE_FOV, WALL_HEIGHT, EYE_HEIGHT,
     makeTextures, createMonster, stepMonster, monsterCloseness,
     MONSTER_SPEED, MONSTER_MIN_START, CATCH_RADIUS,
   };
