@@ -15,7 +15,7 @@ vendored in `vendor/` and loaded on demand by the maze.
 | **Matching Cards** | Four board sizes, solo against the clock or two players |
 | **Snake** | Three speeds and sizes, solid walls or wrap-around, saved best scores |
 | **Car Racing** | 3D perspective racer — 8 cars, 6 laps, 3 maps, pick your car and paint |
-| **Escape the Maze** | First-person 3D maze runs — pick Small, Medium or Large and finish three |
+| **Escape the Maze** | First-person 3D maze runs — pick Small, Medium or Large, finish three, and outrun the thing chasing you |
 
 ## The CPU opponents
 
@@ -56,7 +56,7 @@ Controls: **W / ↑** throttle, **A D** or **← →** steer, **S / ↓** brake,
 
 The one game that uses a library. The road racer fakes 3D with a perspective
 projection onto a 2D canvas; the maze is real 3D — three.js, a WebGL camera,
-instanced wall geometry and a torch that follows you.
+instanced wall geometry and sky lighting.
 
 three.js is **vendored as a classic script** rather than pulled from a CDN or
 imported as an ES module, because the arcade has to keep working offline and
@@ -83,7 +83,7 @@ first stars out — and lit by that sky rather than by a lamp on the camera, so
 the walls stay matte instead of glowing.
 
 Controls: **W S** walk, **A D** strafe, **arrow keys** turn, **space** sprint,
-and the mouse once you are fullscreen.
+and the mouse once you are fullscreen. You will want the sprint.
 
 The minimap shows three things and nothing else: where you are, where you have
 been, and where the exit is. It never draws walls you have not walked past and
@@ -92,6 +92,24 @@ maze for you.
 
 Maze generation is a recursive backtracker, which produces a *perfect* maze:
 every square reachable, exactly one route between any two points, no loops.
+
+### The thing in the maze
+
+Something else is down there, and it always knows exactly where you are. Every
+third of a second it runs the same breadth-first search the solver uses, from
+its square to yours, and walks the first step of that route. There is no line
+of sight to break and nowhere to hide.
+
+The only defence is that it is slower than you: it moves at 2.45 squares a
+second against your 3.1 walking and 5.9 sprinting. Keep moving and you stay
+ahead; stop to work out where you are and it closes. It spawns at least eight
+squares away and never near the exit, so you are never made to walk into it to
+finish. Let it reach you and the run ends where you stand.
+
+You hear it before you see it. A low drone rides under everything, getting
+louder, brighter and faster as it closes — a slow pulse at a distance, a fast
+one when it is round the corner. It shows on the minimap only once it is
+almost on top of you, so the sound is your warning, not the map.
 
 ## Fullscreen
 

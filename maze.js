@@ -205,12 +205,102 @@ function stepWalker(maze, walker, input, dt) {
   return walker;
 }
 
+/* ---------- the thing in the maze ---------- */
+
+/* It always knows exactly where you are. Every so often it runs the same
+   breadth-first search the solver uses, from its square to yours, and walks
+   the first step of that route. There is no line of sight to break and nowhere
+   to hide — the only defence is that it is slower than you are, so long as you
+   keep moving.
+
+   Pure, like the walker: given a maze and a player it returns its new state,
+   which is what makes the chase testable without a browser. */
+const MONSTER_SPEED = 2.45;      // cells per second; player walks 3.1
+const MONSTER_REPATH = 0.35;     // seconds between route recalculations
+const CATCH_RADIUS = 0.45;       // cells
+const MONSTER_MIN_START = 8;     // squares of head start, at least
+
+function createMonster(maze, walker, rng = Math.random) {
+  // Spawn as far away as the maze allows, but never on the exit — being made
+  // to walk into the monster to finish would not be a fair maze.
+  const far = [];
+
+  for (let y = 1; y < maze.h - 1; y++) {
+    for (let x = 1; x < maze.w - 1; x++) {
+      if (isWall(maze, x, y)) continue;
+      if (Math.abs(x - maze.exit.x) < 3 && Math.abs(y - maze.exit.y) < 3) continue;
+      const gap = Math.abs(x - walker.x) + Math.abs(y - walker.y);
+      if (gap >= MONSTER_MIN_START) far.push({ x, y });
+    }
+  }
+
+  const spot = far.length ? far[Math.floor(rng() * far.length)] : { ...maze.exit };
+
+  return {
+    x: spot.x + 0.5,
+    y: spot.y + 0.5,
+    yaw: 0,
+    path: [],
+    sinceRepath: MONSTER_REPATH,   // work out a route on the first step
+    caught: false,
+  };
+}
+
+function stepMonster(maze, monster, walker, dt) {
+  if (monster.caught || walker.escaped) return monster;
+
+  monster.sinceRepath += dt;
+  if (monster.sinceRepath >= MONSTER_REPATH || monster.path.length === 0) {
+    monster.sinceRepath = 0;
+    const route = solveMaze(
+      maze,
+      { x: Math.floor(monster.x), y: Math.floor(monster.y) },
+      { x: Math.floor(walker.x), y: Math.floor(walker.y) });
+    monster.path = route ? route.slice(1) : [];
+  }
+
+  let budget = MONSTER_SPEED * dt;
+  while (budget > 0 && monster.path.length) {
+    const next = monster.path[0];
+    const tx = next.x + 0.5;
+    const ty = next.y + 0.5;
+    const dx = tx - monster.x;
+    const dy = ty - monster.y;
+    const gap = Math.hypot(dx, dy);
+
+    if (gap <= budget) {          // reached this square, move on to the next
+      monster.x = tx;
+      monster.y = ty;
+      budget -= gap;
+      monster.path.shift();
+    } else {
+      monster.x += (dx / gap) * budget;
+      monster.y += (dy / gap) * budget;
+      monster.yaw = Math.atan2(dy, dx);
+      budget = 0;
+    }
+  }
+
+  if (Math.hypot(walker.x - monster.x, walker.y - monster.y) < CATCH_RADIUS) {
+    monster.caught = true;
+  }
+
+  return monster;
+}
+
+// How near it feels, 0 (far off) to 1 (on top of you). Straight-line distance,
+// so it swells when it is round the corner rather than only in sight.
+function monsterCloseness(monster, walker) {
+  const gap = Math.hypot(walker.x - monster.x, walker.y - monster.y);
+  return Math.max(0, Math.min(1, 1 - gap / 11));
+}
+
 /* The minimap: where the exit is, where you are, and where you have been.
 
    Deliberately nothing else — no walls, no unexplored ground and above all no
    route to the exit, so it helps you keep track without solving the maze for
    you. */
-function drawMinimap(g, maze, walker, size) {
+function drawMinimap(g, maze, walker, size, monster) {
   const cell = size / Math.max(maze.w, maze.h);
 
   g.clearRect(0, 0, size, size);
@@ -231,6 +321,16 @@ function drawMinimap(g, maze, walker, size) {
     (maze.exit.x + 0.5) * cell - marker / 2,
     (maze.exit.y + 0.5) * cell - marker / 2,
     marker, marker);
+
+  // The monster, but only once it is close enough that you would hear it —
+  // a map that tracked it across the whole maze would remove all the tension.
+  if (monster && monsterCloseness(monster, walker) > 0.35) {
+    const blip = Math.max(3, cell * 1.5);
+    g.fillStyle = '#ef4444';
+    g.beginPath();
+    g.arc(monster.x * cell, monster.y * cell, blip / 2, 0, Math.PI * 2);
+    g.fill();
+  }
 
   // You, with a nose showing which way you face.
   const px = walker.x * cell;
@@ -258,7 +358,99 @@ function drawMinimap(g, maze, walker, size) {
 
    Pure apart from the context it draws into, so it can be rendered and looked
    at outside a browser. */
-function drawRaycast(g, maze, walker, pitch, width, height) {
+/* The creature, drawn column by column so the wall depths can hide it: a
+   heavy domed cap over a pale face with hollow eyes and a wide grin. */
+function drawCreature(g, cx, feet, wide, tall, distance, depth, width) {
+  const left = Math.floor(cx - wide / 2);
+  const right = Math.ceil(cx + wide / 2);
+  const top = feet - tall;
+  const capH = tall * 0.33;
+  const fade = Math.max(0.25, 1 - distance / 16);
+
+  // Only the columns that are nearer than the wall behind them get drawn.
+  for (let x = left; x <= right; x++) {
+    if (x < 0 || x >= width) continue;
+    if (depth[x] <= distance) continue;
+
+    const across = (x - cx) / (wide / 2);          // -1 .. 1
+    if (Math.abs(across) > 1) continue;
+
+    g.globalAlpha = fade;
+
+    // Cap: a dome, so its height falls away toward the edges. Shaded a little
+    // darker down the left, which is what stops it reading as a flat cut-out.
+    const domeTop = top + capH * (1 - Math.sqrt(Math.max(0, 1 - across * across)));
+    const capBottom = top + capH;
+    g.fillStyle = across < -0.45 ? '#cdc8c1' : '#e6e2dc';
+    g.fillRect(x, domeTop, 1, Math.max(1, capBottom - domeTop));
+
+    // The dark crown is a second, smaller dome set into the cap — give it its
+    // own curve or the middle of the head looks like a painted-on rectangle.
+    const inset = Math.abs(across) / 0.46;
+    if (inset < 1) {
+      const crownTop = top + capH * (0.08 + 0.66 * (1 - Math.sqrt(1 - inset * inset)));
+      g.fillStyle = across < -0.2 ? '#7a1717' : '#8f1d1d';
+      g.fillRect(x, crownTop, 1, Math.max(1, capBottom - crownTop));
+    }
+
+    // The face sits under the cap brim; the eyes and grin are painted on it.
+    const faceBottom = capBottom + tall * 0.32;
+    if (Math.abs(across) < 0.78) {
+      g.fillStyle = across < -0.2 ? '#c8bca8' : '#ded2c0';
+      g.fillRect(x, capBottom, 1, Math.max(1, faceBottom - capBottom));
+    }
+
+    // Body: narrower still, and darkening toward the feet so it sinks into
+    // the floor rather than sitting on top of it.
+    if (Math.abs(across) < 0.5) {
+      g.fillStyle = across < -0.18 ? '#b9ae9f' : '#d5cabb';
+      g.fillRect(x, faceBottom, 1, Math.max(1, feet - faceBottom));
+      g.fillStyle = 'rgba(10, 12, 18, 0.45)';
+      g.fillRect(x, feet - tall * 0.05, 1, tall * 0.05);
+    } else if (Math.abs(across) < 0.76) {
+      // Long thin arms, hanging.
+      g.fillStyle = '#9e9280';
+      g.fillRect(x, faceBottom, 1, Math.max(1, feet - tall * 0.14 - faceBottom));
+    }
+
+    g.globalAlpha = 1;
+  }
+
+  // Face, only once it is close enough to make out.
+  if (wide > 20) {
+    const faceTop = top + capH;
+    const eyeY = faceTop + tall * 0.1;
+    const eyeR = wide * 0.09;
+    const visible = (px) => px >= 0 && px < width && depth[Math.round(px)] > distance;
+
+    g.globalAlpha = fade;
+    g.fillStyle = '#0b0b0d';
+    for (const side of [-1, 1]) {
+      const ex = cx + side * wide * 0.19;
+      if (!visible(ex)) continue;
+      g.beginPath();
+      g.ellipse(ex, eyeY, eyeR, eyeR * 1.45, 0, 0, Math.PI * 2);
+      g.fill();
+    }
+
+    if (visible(cx)) {                              // the grin
+      const mouthY = faceTop + tall * 0.23;
+      g.beginPath();
+      g.ellipse(cx, mouthY, wide * 0.3, tall * 0.04, 0, 0, Math.PI * 2);
+      g.fill();
+
+      g.fillStyle = '#e8e8e8';                      // teeth
+      const teeth = 7;
+      for (let i = 0; i < teeth; i++) {
+        const tx = cx - wide * 0.25 + (wide * 0.5 / (teeth - 1)) * i;
+        g.fillRect(tx, mouthY - tall * 0.035, Math.max(1, wide * 0.022), tall * 0.032);
+      }
+    }
+    g.globalAlpha = 1;
+  }
+}
+
+function drawRaycast(g, maze, walker, pitch, width, height, monster) {
   const fov = (MAZE_FOV * Math.PI) / 180;
   const planeHalf = Math.tan(fov / 2);
   const project = width / 2 / planeHalf;         // world units to pixels at 1 away
@@ -411,6 +603,26 @@ function drawRaycast(g, maze, walker, pitch, width, height) {
         if (y > bottom) continue;
         g.fillStyle = `rgba(226, 232, 240, ${0.1 * (1 - step / 12)})`;
         g.fillRect(x, y, 2, 1);
+      }
+    }
+  }
+
+  // The monster, billboarded and depth-tested like the exit.
+  if (monster) {
+    const relX = monster.x - walker.x;
+    const relY = monster.y - walker.y;
+    const det = planeX * dirY - dirX * planeY;
+    if (det !== 0) {
+      const invDet = 1 / det;
+      const camX = invDet * (dirY * relX - dirX * relY);
+      const camY = invDet * (-planeY * relX + planeX * relY);
+
+      if (camY > 0.12) {
+        const screenX = (width / 2) * (1 + camX / camY);
+        const tall = (project / camY) * 1.42;
+        const wide = tall * 0.5;
+        const feet = horizon + (EYE_HEIGHT / camY) * project;
+        drawCreature(g, screenX, feet, wide, tall, camY, depth, width);
       }
     }
   }
@@ -650,6 +862,11 @@ function mountMaze(ctx) {
   let maze = buildMaze(course.levels[0], course.levels[0]);
   let walker = createWalker(maze);
   let courseDone = false;
+  let monster = null;
+  let stalker = null;
+  let caught = false;
+  let footfall = 0;
+  const lastFoot = { x: null, y: null };
   let scene = null;
   let camera = null;
   let renderer = null;
@@ -657,6 +874,7 @@ function mountMaze(ctx) {
   let torch = null;
   let exitPillar = null;
   let exitGlow = null;
+  let creature = null;
   let pitch = 0;          // mouse look up/down, radians
   let mouseLook = false;  // only true while the pointer is locked
   let flatCanvas = null;  // the 2D fallback view, when WebGL is unavailable
@@ -722,7 +940,7 @@ function mountMaze(ctx) {
   // page, so going fullscreen also grabs the pointer for mouse look.
   ctx.setFullscreenTarget(view);
   ctx.setTheme('maze');
-  ctx.setHint('W S walk · A D strafe · ← → turn · space sprint · ⛶ mouse look');
+  ctx.setHint('W S walk · A D strafe · ← → turn · space sprint · ⛶ mouse look · something is hunting you');
 
   function setInput(dir, down) {
     if (dir === 'up') input.forward = down;
@@ -838,6 +1056,51 @@ function mountMaze(ctx) {
 
     torch = null;
     scene.add(camera);
+
+    /* The creature: a heavy pale cap with a dark crown over a round face with
+       hollow eyes and a wide grin. Built from primitives so it costs nothing
+       to draw and needs no model file. */
+    creature = new THREE.Group();
+
+    const cap = new THREE.Mesh(
+      new THREE.SphereGeometry(0.44, 20, 14, 0, Math.PI * 2, 0, Math.PI * 0.62),
+      new THREE.MeshLambertMaterial({ color: 0xe8e4de }));
+    cap.position.y = 0.86;
+    cap.scale.set(1, 0.82, 1);
+    creature.add(cap);
+
+    const crown = new THREE.Mesh(
+      new THREE.SphereGeometry(0.3, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.5),
+      new THREE.MeshLambertMaterial({ color: 0x8f1d1d }));
+    crown.position.y = 0.95;
+    crown.scale.set(1, 0.72, 1);
+    creature.add(crown);
+
+    const face = new THREE.Mesh(
+      new THREE.SphereGeometry(0.24, 16, 12),
+      new THREE.MeshLambertMaterial({ color: 0xd8c9b6 }));
+    face.position.y = 0.6;
+    creature.add(face);
+
+    const dark = new THREE.MeshBasicMaterial({ color: 0x08080a });
+    for (const side of [-1, 1]) {
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.06, 10, 8), dark);
+      eye.position.set(side * 0.09, 0.65, 0.2);
+      eye.scale.set(1, 1.5, 0.6);
+      creature.add(eye);
+    }
+
+    const grin = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.09, 0.06), dark);
+    grin.position.set(0, 0.53, 0.21);
+    creature.add(grin);
+
+    const body = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.17, 0.22, 0.42, 12),
+      new THREE.MeshLambertMaterial({ color: 0xd2c7b8 }));
+    body.position.y = 0.24;
+    creature.add(body);
+
+    scene.add(creature);
   }
 
   // three.js does not free GPU buffers on its own; rebuilding a maze every
@@ -851,6 +1114,7 @@ function mountMaze(ctx) {
       }
     });
     if (camera) camera.clear();
+    creature = null;
   }
 
   function startRenderer() {
@@ -897,7 +1161,7 @@ function mountMaze(ctx) {
     flat = flatCanvas.getContext('2d');
     view.replaceChildren(flatCanvas, minimap);
     resize();
-    ctx.setHint('W S walk · A D strafe · ← → turn · space sprint · ⛶ mouse look');
+    ctx.setHint('W S walk · A D strafe · ← → turn · space sprint · ⛶ mouse look · something is hunting you');
     ctx.setStatus(`${reason} Playing in 2D instead.`);
     loadLevel();
     start();
@@ -912,7 +1176,8 @@ function mountMaze(ctx) {
 
     const before = walker.escaped;
     stepWalker(maze, walker, input, dt);
-    if (!courseDone) seconds += dt;
+    if (monster && !caught) stepMonster(maze, monster, walker, dt);
+    if (!courseDone && !caught) seconds += dt;
 
     // A little head bob while walking, and a torch that flickers.
     const walking = (input.forward || input.back) && !walker.escaped;
@@ -924,18 +1189,48 @@ function mountMaze(ctx) {
     if (exitGlow) exitGlow.intensity = 1.4 + Math.sin(seconds * 3) * 0.5;
     if (exitPillar) exitPillar.rotation.y += dt * 0.6;
 
+    // Keep the creature where the simulation says it is, always facing you,
+    // lurching a little as it walks.
+    if (creature) {
+      creature.visible = Boolean(monster) && !caught;
+      if (monster) {
+        creature.position.set(monster.x, Math.abs(Math.sin(seconds * 6)) * 0.05, monster.y);
+        creature.rotation.y = Math.atan2(walker.x - monster.x, walker.y - monster.y);
+        creature.rotation.z = Math.sin(seconds * 3) * 0.05;
+      }
+    }
+
     if (flat) {
-      drawRaycast(flat, maze, { ...walker, y: walker.y }, pitch, flatCanvas.width, flatCanvas.height);
+      drawRaycast(flat, maze, walker, pitch, flatCanvas.width, flatCanvas.height, monster);
     } else {
       camera.position.set(walker.x, eye, walker.y);
       camera.rotation.set(pitch, -walker.yaw - Math.PI / 2, 0, 'YXZ');
       renderer.render(scene, camera);
     }
 
-    drawMinimap(map2d, maze, walker, MINIMAP_PX);
+    drawMinimap(map2d, maze, walker, MINIMAP_PX, monster);
     scoreRow.set('time', clock(seconds));
 
+    // Proximity drone, and a footstep every so often as you cover ground.
+    if (stalker) stalker.set(monster && !caught ? monsterCloseness(monster, walker) : 0);
+    footfall += Math.hypot(walker.x - (lastFoot.x ?? walker.x), walker.y - (lastFoot.y ?? walker.y));
+    lastFoot.x = walker.x;
+    lastFoot.y = walker.y;
+    if (footfall > 0.75) {
+      footfall = 0;
+      audio.play('step');
+    }
+
+    if (monster && monster.caught && !caught) return grabbed();
     if (walker.escaped && !before) escape();
+  }
+
+  // Caught. The run is over wherever you were in it.
+  function grabbed() {
+    caught = true;
+    stop();
+    audio.play('caught');
+    ctx.setStatus(`It caught you on maze ${level + 1} of ${course.levels.length} · ${clock(seconds)}`, false);
   }
 
   // Escaping one maze drops you straight into the next. The clock keeps
@@ -969,6 +1264,10 @@ function mountMaze(ctx) {
     const cells = course.levels[level];
     maze = buildMaze(cells, cells);
     walker = createWalker(maze);
+    monster = createMonster(maze, walker);
+    footfall = 0;
+    lastFoot.x = null;
+    lastFoot.y = null;
     pitch = 0;
 
     const route = solveMaze(maze);
@@ -982,6 +1281,7 @@ function mountMaze(ctx) {
     stop();
     running = true;
     lastTime = performance.now();
+    if (!stalker) stalker = audio.stalker();
     frame = requestAnimationFrame(loop);
   }
 
@@ -989,6 +1289,7 @@ function mountMaze(ctx) {
     if (frame !== null) cancelAnimationFrame(frame);
     frame = null;
     running = false;
+    if (stalker) { stalker.stop(); stalker = null; }
   }
 
   function restart() {
@@ -996,6 +1297,7 @@ function mountMaze(ctx) {
     level = 0;
     seconds = 0;
     courseDone = false;
+    caught = false;
     Object.keys(input).forEach((k) => { input[k] = false; });
 
     scoreRow.set('time', clock(0));
@@ -1137,5 +1439,7 @@ if (typeof module !== 'undefined') {
     buildMaze, solveMaze, isWall, createWalker, stepWalker, moveWalker,
     MAZE_COURSES, courseById, WALKER_RADIUS, WALK_SPEED, TURN_SPEED, SPRINT_MULTIPLIER,
     drawRaycast, drawMinimap, cellKey, MAZE_FOV, WALL_HEIGHT, EYE_HEIGHT,
+    createMonster, stepMonster, monsterCloseness,
+    MONSTER_SPEED, MONSTER_MIN_START, CATCH_RADIUS,
   };
 }

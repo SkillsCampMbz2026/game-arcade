@@ -124,6 +124,12 @@ const audio = (() => {
     win: () => notes([523, 659, 784, 1047], 0.1),
     lose: () => notes([392, 330, 262], 0.13, { type: 'sawtooth', gain: 0.18 }),
     draw: () => notes([440, 415], 0.12),
+    step: () => hiss({ dur: 0.07, freq: 260, gain: 0.09, type: 'lowpass' }),
+    caught: () => {
+      tone({ freq: 320, to: 60, dur: 0.7, type: 'sawtooth', gain: 0.34 });
+      tone({ freq: 190, to: 44, dur: 0.8, type: 'square', gain: 0.2, delay: 0.04 });
+      hiss({ dur: 0.6, freq: 900, gain: 0.3, type: 'bandpass' });
+    },
     beep: () => tone({ freq: 440, dur: 0.16, type: 'square', gain: 0.2 }),
     go: () => { tone({ freq: 880, dur: 0.3, type: 'square', gain: 0.24 }); hiss({ dur: 0.25, freq: 2400, gain: 0.1 }); },
     crash: () => { tone({ freq: 150, to: 50, dur: 0.3, type: 'sawtooth', gain: 0.3 }); hiss({ dur: 0.3, freq: 700, gain: 0.3, type: 'lowpass' }); },
@@ -212,11 +218,71 @@ const audio = (() => {
     };
   }
 
+  /* Something following you. A low drone with a pulse over it; both get
+     louder, brighter and faster as whatever it is closes in, which tells you
+     it is near before you can see it. */
+  function stalker() {
+    const c = context();
+    if (!c) return { set() {}, stop() {} };
+
+    const drone = c.createOscillator();
+    const filter = c.createBiquadFilter();
+    const amp = c.createGain();
+
+    drone.type = 'sawtooth';
+    drone.frequency.value = 38;
+    filter.type = 'lowpass';
+    filter.frequency.value = 160;
+    amp.gain.value = 0;
+
+    // A slow pulse riding on the gain — the heartbeat.
+    const pulse = c.createOscillator();
+    const pulseDepth = c.createGain();
+    pulse.type = 'sine';
+    pulse.frequency.value = 0.9;
+    pulseDepth.gain.value = 0;
+    pulse.connect(pulseDepth);
+    pulseDepth.connect(amp.gain);
+
+    drone.connect(filter);
+    filter.connect(amp);
+    amp.connect(master);
+    drone.start();
+    pulse.start();
+
+    let stopped = false;
+
+    return {
+      // closeness runs 0 (far away or nothing there) to 1 (right behind you)
+      set(closeness) {
+        if (stopped) return;
+        const t = c.currentTime;
+        const near = Math.max(0, Math.min(1, closeness));
+        amp.gain.setTargetAtTime(enabled ? near * 0.1 : 0, t, 0.15);
+        pulseDepth.gain.setTargetAtTime(enabled ? near * 0.07 : 0, t, 0.15);
+        pulse.frequency.setTargetAtTime(0.8 + near * 3.4, t, 0.25);
+        filter.frequency.setTargetAtTime(140 + near * 620, t, 0.25);
+        drone.frequency.setTargetAtTime(36 + near * 30, t, 0.25);
+      },
+      stop() {
+        if (stopped) return;
+        stopped = true;
+        try {
+          const t = c.currentTime;
+          amp.gain.setTargetAtTime(0, t, 0.05);
+          drone.stop(t + 0.25);
+          pulse.stop(t + 0.25);
+        } catch { /* already stopped */ }
+      },
+    };
+  }
+
   return {
     get enabled() { return enabled; },
     available: () => Boolean(context()),
     play,
     engine,
+    stalker,
     toggle() {
       enabled = !enabled;
       storage.set('sound-on', enabled);
