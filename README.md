@@ -347,7 +347,26 @@ remembers your choice.
 
 ## Running it
 
-Open `index.html`. That's the whole of it.
+Open `index.html` and it plays. One caveat: a `file://` page is not allowed to
+fetch a sibling file, so the maze's monster model never arrives and it falls
+back to a stand-in creature. To get everything, serve it:
+
+    node serve.js            # all interfaces, port 8080
+    node serve.js 8090       # a different port
+    node serve.js 8090 127.0.0.1   # this machine only
+
+Node's own modules only — there is nothing to install. Started on all
+interfaces it prints every address it can be reached on, so anyone else on the
+network can play. On Windows the port needs an inbound rule:
+
+    New-NetFirewallRule -DisplayName "Game Arcade (LAN)" -Direction Inbound `
+      -Action Allow -Protocol TCP -LocalPort 8090 `
+      -Profile Domain,Private -RemoteAddress LocalSubnet
+
+`-RemoteAddress LocalSubnet` keeps it to the local network rather than opening
+the port to everything the machine can see. Remove it again with:
+
+    Remove-NetFirewallRule -DisplayName "Game Arcade (LAN)"
 
 ## Layout
 
@@ -361,6 +380,7 @@ Open `index.html`. That's the whole of it.
     snake.js        Snake
     racing.js       Car Racing
     glb.js          a small .glb reader, for the monster model
+    serve.js        a static server, for playing over a network
     maze.js         Escape the Maze (three.js)
     style.css       everything visual
     vendor/         three.min.js, loaded on demand
