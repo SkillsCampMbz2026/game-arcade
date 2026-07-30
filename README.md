@@ -259,17 +259,56 @@ look releases the pointer, because there is no cursor to click Retry with
 otherwise, but it leaves you in fullscreen: you should not be thrown out of the
 game to restart.
 
-The gun sits in the bottom-right, sways with your stride and kicks down and
-back on every shot. It is deliberately blocky: laid out on a sixteen-square
-grid as a character map, one filled square per cell, no curves and no
-gradients. Reading it off a picture rather than out of a list of drawing calls
-makes it far easier to change — to move the sight, move the S. The 3D copy uses
-nearest-neighbour filtering, since smoothing it back out would defeat the
-point.
+### The weapons
 
-Like the creature's face it is painted onto one transparent canvas and used by
-both renderers — a plane pinned to the camera in 3D, a blit into the corner in
-the 2D fallback — so there is one drawing of it rather than two that drift.
+Five to choose from — 9mm, Revolver, SMG, Shotgun, Sniper — all supplied
+models, in `weapons/`. They differ in looks only; every one of them shoots the
+same.
+
+The weapon is drawn in **a second pass over a cleared depth buffer**, in a
+little scene of its own with its own camera and lights. Simply turning depth
+testing off would keep walls from cutting through it, but a solid model also
+has to occlude itself — a barrel in front of a stock — and that needs a depth
+buffer. Doing it this way means the gun can never clip through a wall you are
+standing against, and it is lit the same wherever you happen to be.
+
+Each model is authored to its own convention — three point down -Z, one down
++Z, one down +X — so the table in `maze.js` carries, per weapon, the turn that
+aims it away from you, the length to scale it to, and where to hang it in the
+corner. Those numbers were set by rendering each model through a **copy of the
+game's own camera**, same field of view and aspect, rather than by trying it in
+a browser and nudging. Five weapons times five numbers is a lot of nudging.
+
+#### Getting them down to a sensible size
+
+As supplied the five came to **138 MB**, and 93% of that was texture data:
+base colour, normal, roughness, occlusion and emissive maps at up to 4096
+square. For something that occupies a twentieth of the screen and is lit by two
+directional lights, only the base colour does any visible work.
+
+`tools/slim-glb.js` keeps that, at 512 square re-encoded as JPEG, and discards
+the rest along with the vertex attributes nothing reads — tangents, and the
+second through *tenth* UV sets, which one of these files really does carry.
+**138 MB becomes 6.3 MB**, with the geometry untouched.
+
+It also throws out two things that came with the models rather than being part
+of them, found by shape rather than by name:
+
+- **A backdrop.** One was exported with the studio floor still in shot: a
+  32-triangle plane 2,930 units across, around a pistol 310 units long.
+- **A loose part.** The same file had its magazine laid out beside the gun. A
+  weapon is thin, and every part of one is thin the same way; that magazine
+  measured 3.4x the body's thickness across that axis, where every genuine part
+  of all five measures under 1.2x.
+
+#### The blocky one
+
+Until a model arrives — and on any page opened from `file://`, where a fetch of
+a sibling file is blocked outright — you hold a painted gun instead. It is
+deliberately blocky: laid out on a sixteen-square grid as a character map, one
+filled square per cell. To move the sight, move the S. That is also what the 2D
+fallback draws, blitted into the corner, since a model needs a GPU and that
+renderer exists for machines without one.
 
 ### What it looks like
 
@@ -379,7 +418,9 @@ the port to everything the machine can see. Remove it again with:
     matching.js     Matching Cards
     snake.js        Snake
     racing.js       Car Racing
-    glb.js          a small .glb reader, for the monster model
+    glb.js          a small .glb reader, for the models
+    weapons/        the five guns, slimmed for the web
+    tools/          slim-glb.js, which did the slimming
     serve.js        a static server, for playing over a network
     maze.js         Escape the Maze (three.js)
     style.css       everything visual

@@ -18,6 +18,14 @@ const GLB_BIN = 0x004e4942;        // 'BIN\0'
 
 const GLB_PARTS = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 };
 
+const GLB_KNOWN_EXTENSIONS = new Set([
+  'KHR_materials_pbrSpecularGlossiness',   // read for its diffuse colour and map
+  'KHR_materials_emissive_strength',       // shading nuance, safely ignored
+  'KHR_materials_specular',
+  'KHR_materials_ior',
+  'KHR_texture_transform',
+]);
+
 const GLB_COMPONENTS = {
   5120: { array: Int8Array, bytes: 1 },
   5121: { array: Uint8Array, bytes: 1 },
@@ -57,9 +65,14 @@ function parseGLB(buffer) {
   }
 
   if (!json) throw new Error('.glb has no JSON chunk');
-  const needed = json.extensionsRequired;
-  if (needed && needed.length) {
-    throw new Error(`needs glTF extensions this reader does not have: ${needed.join(', ')}`);
+  /* Extensions we can honour: the specular-glossiness materials some exporters
+     still write, and a handful that only affect shading subtleties this
+     renderer does not attempt anyway. Anything else — Draco geometry, Basis
+     textures — genuinely cannot be read, so say so rather than produce a model
+     with holes in it. */
+  const missing = (json.extensionsRequired || []).filter((name) => !GLB_KNOWN_EXTENSIONS.has(name));
+  if (missing.length) {
+    throw new Error(`needs glTF extensions this reader does not have: ${missing.join(', ')}`);
   }
 
   return { json, bin: bin || new Uint8Array(0) };
@@ -198,14 +211,28 @@ function glbGeometry(json, bin, { pose } = {}) {
     const key = primitive.material === undefined ? -1 : primitive.material;
     let bucket = groups.get(key);
     if (!bucket) {
-      bucket = { position: [], uv: [], index: [] };
+      bucket = { position: [], normal: [], uv: [], index: [] };
       groups.set(key, bucket);
     }
 
     const position = readAccessor(json, bin, primitive.attributes.POSITION);
     const uv = primitive.attributes.TEXCOORD_0 === undefined
       ? null : readAccessor(json, bin, primitive.attributes.TEXCOORD_0);
+    const normal = primitive.attributes.NORMAL === undefined
+      ? null : readAccessor(json, bin, primitive.attributes.NORMAL);
     const first = bucket.position.length / 3;
+
+    /* Normals are directions, so they take the rotation but not the
+       translation, and a mirrored or non-uniformly scaled node needs the
+       inverse transpose. Guns are rigid bodies here, so rotating them is
+       right and far cheaper. */
+    const rotate = (x, y, z) => {
+      const nx = world[0] * x + world[4] * y + world[8] * z;
+      const ny = world[1] * x + world[5] * y + world[9] * z;
+      const nz = world[2] * x + world[6] * y + world[10] * z;
+      const len = Math.hypot(nx, ny, nz) || 1;
+      return [nx / len, ny / len, nz / len];
+    };
 
     for (let i = 0; i < position.length; i += 3) {
       const [x, y, z] = [position[i], position[i + 1], position[i + 2]];
@@ -216,6 +243,13 @@ function glbGeometry(json, bin, { pose } = {}) {
       bucket.position.push(wx, wy, wz);
       const vertex = i / 3;
       bucket.uv.push(uv ? uv[vertex * 2] : 0, uv ? uv[vertex * 2 + 1] : 0);
+
+      if (normal) {
+        const [nx, ny, nz] = rotate(normal[i], normal[i + 1], normal[i + 2]);
+        bucket.normal.push(nx, ny, nz);
+      } else {
+        bucket.normal.push(0, 0, 0);      // filled in by computeVertexNormals
+      }
 
       bounds.min[0] = Math.min(bounds.min[0], wx);
       bounds.min[1] = Math.min(bounds.min[1], wy);
@@ -244,7 +278,12 @@ function glbGeometry(json, bin, { pose } = {}) {
    black — 0.024 linear is a mid navy once converted, but a very dark one if it
    is taken for sRGB. */
 function glbMaterial(json, definition, map) {
-  const pbr = (definition && definition.pbrMetallicRoughness) || {};
+  const spec = definition && definition.extensions
+    && definition.extensions.KHR_materials_pbrSpecularGlossiness;
+  // Specular-glossiness keeps its base colour under a different name.
+  const pbr = spec
+    ? { baseColorFactor: spec.diffuseFactor, baseColorTexture: spec.diffuseTexture }
+    : (definition && definition.pbrMetallicRoughness) || {};
   const material = new THREE.MeshPhongMaterial({
     color: 0xffffff,
     shininess: 8,
@@ -306,7 +345,11 @@ async function buildGLBModel(json, bin, options = {}) {
 
   for (const [key, bucket] of groups) {
     const definition = key < 0 ? null : json.materials[key];
-    const pbr = (definition && definition.pbrMetallicRoughness) || {};
+    const spec = definition && definition.extensions
+      && definition.extensions.KHR_materials_pbrSpecularGlossiness;
+    const pbr = spec
+      ? { baseColorTexture: spec.diffuseTexture }
+      : (definition && definition.pbrMetallicRoughness) || {};
     let map = null;
     if (pbr.baseColorTexture) {
       const source = json.textures[pbr.baseColorTexture.index];
@@ -317,7 +360,12 @@ async function buildGLBModel(json, bin, options = {}) {
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(bucket.position, 3));
     geometry.setAttribute('uv', new THREE.Float32BufferAttribute(bucket.uv, 2));
     geometry.setIndex(bucket.index);
-    geometry.computeVertexNormals();
+
+    // Only work them out when the file did not supply them: recomputing
+    // smooths every hard edge, which on a machined object is very obvious.
+    const supplied = bucket.normal.some((v) => v !== 0);
+    if (supplied) geometry.setAttribute('normal', new THREE.Float32BufferAttribute(bucket.normal, 3));
+    else geometry.computeVertexNormals();
 
     model.add(new THREE.Mesh(geometry, glbMaterial(json, definition, map)));
   }

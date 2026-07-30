@@ -17,6 +17,30 @@ const MONSTER_HEIGHT = 1.42;     // world units, kept under the 1.5 wall height
    they hang like the reference picture and, more to the point, the thing then
    fits down a one-square corridor instead of standing 1.26 units wide in it. */
 const MONSTER_SHOULDER = 1.15;   // radians
+
+/* The weapons.
+
+   Five supplied models, each authored to its own convention — three point down
+   -Z, one down +Z, one down +X — so each carries the turn that aims it away
+   from the camera, the length to scale it to, and where to hang it in the
+   corner of the view. Those numbers were set by rendering each one through a
+   copy of the game's own camera rather than by trying it in a browser and
+   nudging.
+
+   The models are cut-down copies: base colour only, at 512 square. As supplied
+   the five came to 138 MB, of which 93% was normal, roughness and occlusion
+   maps at up to 4096 square — none of which this renderer reads, for a thing
+   that occupies a twentieth of the screen. */
+const MAZE_WEAPONS = [
+  { id: 'pistol', label: '9mm', file: 'weapons/pistol.glb', yaw: 0.1, pitch: 0.05, length: 0.28, at: [0.12, -0.11, -0.32] },
+  { id: 'revolver', label: 'Revolver', file: 'weapons/revolver.glb', yaw: 3.19, pitch: 0.05, length: 0.3, at: [0.12, -0.11, -0.33] },
+  { id: 'smg', label: 'SMG', file: 'weapons/smg.glb', yaw: 0.1, pitch: 0.05, length: 0.42, at: [0.12, -0.12, -0.34] },
+  { id: 'shotgun', label: 'Shotgun', file: 'weapons/shotgun.glb', yaw: 3.48, pitch: 0.05, length: 0.34, at: [0.13, -0.09, -0.32] },
+  { id: 'sniper', label: 'Sniper', file: 'weapons/sniper.glb', yaw: 1.6708, pitch: 0.05, length: 0.46, at: [0.12, -0.11, -0.34] },
+];
+
+const weaponById = (id) => MAZE_WEAPONS.find((w) => w.id === id) || MAZE_WEAPONS[0];
+
 const BRICK_TEX = 256;   // texture edge, in pixels
 const FACE_TEX = 256;    // the creature's face, likewise
 const GUN_TEX = 256;     // and the gun in your hands
@@ -1722,6 +1746,50 @@ function loadMonsterModel() {
   return monsterModelLoad;
 }
 
+/* The weapon models, fetched and prepared on demand and kept once fetched.
+
+   Each is scaled to its listed length, turned to point away from the camera and
+   moved into the corner of the view, so the group handed back is ready to be
+   parented to the gun camera as it is. Resolves to null rather than rejecting:
+   from a file:// page a fetch of a sibling file is blocked outright, and the
+   maze has to stay playable, so the caller falls back to the painted one. */
+const weaponLoads = new Map();
+
+function loadWeaponModel(weapon) {
+  if (weaponLoads.has(weapon.id)) return weaponLoads.get(weapon.id);
+
+  const load = loadGLB(weapon.file).then((model) => {
+    const box = model.userData.bounds;
+    const size = box.max.map((v, i) => v - box.min[i]);
+    const scale = weapon.length / Math.max(...size);
+
+    /* Centre it on its own bounding box first, so the listed offset means the
+       same thing for every model however its origin was authored. */
+    const inner = new THREE.Group();
+    model.position.set(
+      -((box.min[0] + box.max[0]) / 2) * scale,
+      -((box.min[1] + box.max[1]) / 2) * scale,
+      -((box.min[2] + box.max[2]) / 2) * scale);
+    model.scale.setScalar(scale);
+    inner.add(model);
+
+    const rig = new THREE.Group();
+    rig.add(inner);
+    rig.rotation.set(weapon.pitch || 0, weapon.yaw, 0, 'YXZ');
+    rig.position.set(weapon.at[0], weapon.at[1], weapon.at[2]);
+
+    // The offset has to be applied after the turn, not through it.
+    const held = new THREE.Group();
+    held.add(rig);
+    rig.position.set(0, 0, 0);
+    held.position.set(weapon.at[0], weapon.at[1], weapon.at[2]);
+    return held;
+  }).catch(() => null);
+
+  weaponLoads.set(weapon.id, load);
+  return load;
+}
+
 /* Is WebGL usable? Answered once and remembered.
 
    The probe has to give its context straight back. A browser only allows a
@@ -1768,7 +1836,11 @@ function mountMaze(ctx) {
   let shotTimer = 0;                       // counts down to the next shot
   let flash = 0;                           // muzzle flash, seconds remaining
   let recoil = 0;                          // 1 the instant a shot goes off, easing to 0
-  let gunMesh = null;                       // the one you are holding
+  let weapon = MAZE_WEAPONS[0];
+  let gunScene = null;                      // the weapon is drawn in its own pass
+  let gunCamera = null;
+  let gunRig = null;                        // what sway and recoil move
+  let gunModel = null;                      // the loaded weapon, once it arrives
   let killer = null;                        // whichever of them finished you
   let deathTurn = 0;                        // how far through looking at it
   const sprint = { value: STAMINA_MAX, active: false };
@@ -1821,6 +1893,11 @@ function mountMaze(ctx) {
     MAZE_PACKS.map((n) => ({ id: String(n), label: `×${n}` })),
     String(packSize), (id) => { packSize = Number(id); restart(); },
     { ariaLabel: 'How many monsters' });
+
+  const weaponRow = segmented(
+    MAZE_WEAPONS.map((w) => ({ id: w.id, label: w.label })),
+    weapon.id, (id) => { weapon = weaponById(id); fitWeapon(); },
+    { ariaLabel: 'Weapon' });
 
   const packNote = document.createElement('p');
   packNote.className = 'fieldnote';
@@ -1941,7 +2018,7 @@ function mountMaze(ctx) {
     return note;
   }
 
-  ctx.settings.append(courseRow.el, packRow.el, packNote);
+  ctx.settings.append(courseRow.el, packRow.el, packNote, weaponRow.el);
   ctx.score.append(scoreRow.el);
   const fireRow = document.createElement('div');
   fireRow.className = 'holdrow';
@@ -2122,17 +2199,29 @@ function mountMaze(ctx) {
     torch = null;
     scene.add(camera);
 
-    /* The gun, parented to the camera so it rides with the view. depthTest off
-       and a high renderOrder: it is the nearest thing there is, and testing it
-       against the world only risks a wall clipping through your own hands. */
-    gunMesh = new THREE.Mesh(
-      new THREE.PlaneGeometry(0.4, 0.4),
-      new THREE.MeshBasicMaterial({
-        map: skin.gun, transparent: true, depthTest: false, depthWrite: false, fog: false,
-      }));
-    gunMesh.position.set(0.16, -0.155, -0.34);
-    gunMesh.renderOrder = 20;
-    camera.add(gunMesh);
+    /* The weapon lives in a scene of its own, drawn in a second pass over a
+       cleared depth buffer.
+
+       Turning depth testing off instead would stop walls cutting through it,
+       but a solid model also has to occlude itself — a barrel in front of a
+       stock — and that needs a depth buffer of its own. This is the ordinary
+       way to hold a viewmodel out of the world, and it means the weapon can
+       never clip through a wall you are standing against. */
+    gunScene = new THREE.Scene();
+    gunCamera = new THREE.PerspectiveCamera(MAZE_FOV, 16 / 10, 0.01, 4);
+    gunRig = new THREE.Group();
+    gunScene.add(gunRig);
+
+    // Lit on its own terms, so it reads the same wherever you are standing.
+    gunScene.add(new THREE.HemisphereLight(0xdfe8f5, 0x30343c, 1.05));
+    const gunKey = new THREE.DirectionalLight(0xfff3e0, 1.15);
+    gunKey.position.set(-0.6, 1, 0.8);
+    gunScene.add(gunKey);
+    const gunFill = new THREE.DirectionalLight(0x9fbfe8, 0.4);
+    gunFill.position.set(0.9, -0.3, 0.4);
+    gunScene.add(gunFill);
+
+    fitWeapon();
 
     /* The creatures — one per monster, paired by index.
 
@@ -2224,6 +2313,42 @@ function mountMaze(ctx) {
     return [{ material: fur, base: fur.color.clone() }, { material: mitt, base: mitt.color.clone() }];
   }
 
+
+  /* Put the chosen weapon in your hands.
+
+     The model may not have arrived yet, or may never arrive — from a file://
+     page it cannot be fetched at all — so the painted one goes in immediately
+     and the model replaces it when it turns up. Asking for a weapon twice in
+     quick succession is fine: the check on the way back makes sure only the
+     answer for the weapon still selected is used. */
+  function fitWeapon() {
+    if (!gunRig) return;
+    const wanted = weapon;
+
+    gunRig.clear();
+    gunModel = null;
+    gunRig.add(paintedGun());
+
+    loadWeaponModel(wanted).then((model) => {
+      if (destroyed || !gunRig || weapon !== wanted || !model) return;
+      gunModel = model.clone(true);
+      gunRig.clear();
+      gunRig.add(gunModel);
+    });
+  }
+
+  // The blocky one, on a plane — what you hold until a model arrives, and on
+  // any page where one cannot be fetched.
+  function paintedGun() {
+    const plane = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.4, 0.4),
+      new THREE.MeshBasicMaterial({
+        map: makeTextures().gun, transparent: true, depthWrite: false, fog: false,
+      }));
+    plane.position.set(0.16, -0.155, -0.34);
+    return plane;
+  }
+
   // three.js does not free GPU buffers on its own; rebuilding a maze every
   // level would otherwise leak one whole scene each time.
   function disposeScene() {
@@ -2236,6 +2361,10 @@ function mountMaze(ctx) {
     });
     if (camera) camera.clear();
     creatures = [];
+    gunScene = null;
+    gunCamera = null;
+    gunRig = null;
+    gunModel = null;
     coping = null;
     reveal = null;
   }
@@ -2294,6 +2423,10 @@ function mountMaze(ctx) {
     renderer.domElement.style.height = full ? '100%' : 'auto';
     camera.aspect = width / height;
     camera.updateProjectionMatrix();
+    if (gunCamera) {
+      gunCamera.aspect = width / height;
+      gunCamera.updateProjectionMatrix();
+    }
   }
 
   /* The no-WebGL path: same game, drawn by raycasting onto a 2D canvas. */
@@ -2308,6 +2441,18 @@ function mountMaze(ctx) {
     ctx.setStatus(`${reason} Playing in 2D instead.`);
     loadLevel();
     start();
+  }
+
+  /* The world, then the weapon over a cleared depth buffer. Two passes rather
+     than one, so nothing in the maze can cut through the gun in your hands. */
+  function drawWorldAndWeapon() {
+    renderer.autoClear = false;
+    renderer.clear();
+    renderer.render(scene, camera);
+    if (gunScene && gunRig && gunRig.visible) {
+      renderer.clearDepth();
+      renderer.render(gunScene, gunCamera);
+    }
   }
 
   /* ---------- loop ---------- */
@@ -2391,13 +2536,13 @@ function mountMaze(ctx) {
       }
     });
 
-    if (gunMesh) {
+    if (gunRig) {
       // Sways with the walk, kicks down and back on every shot.
-      gunMesh.position.set(
-        0.16 + Math.sin(bob * 0.5) * 0.006 + recoil * 0.022,
-        -0.155 + Math.cos(bob) * 0.005 - recoil * 0.05,
-        -0.34 + recoil * 0.045);
-      gunMesh.rotation.z = -recoil * 0.24;
+      gunRig.position.set(
+        Math.sin(bob * 0.5) * 0.006 + recoil * 0.022,
+        Math.cos(bob) * 0.005 - recoil * 0.05,
+        recoil * 0.045);
+      gunRig.rotation.set(recoil * 0.28, 0, -recoil * 0.1);
     }
 
     if (flat) {
@@ -2405,7 +2550,7 @@ function mountMaze(ctx) {
     } else {
       camera.position.set(walker.x, eye, walker.y);
       camera.rotation.set(pitch, -walker.yaw - Math.PI / 2, 0, 'YXZ');
-      renderer.render(scene, camera);
+      drawWorldAndWeapon();
     }
 
     mapAge += dt;
@@ -2467,10 +2612,10 @@ function mountMaze(ctx) {
     if (flat) {
       drawRaycast(flat, maze, walker, pitch, flatCanvas.width, flatCanvas.height, monsters, 0);
     } else if (renderer) {
-      if (gunMesh) gunMesh.visible = false;       // you have dropped it
+      if (gunRig) gunRig.visible = false;         // you have dropped it
       camera.position.set(walker.x, sink, walker.y);
       camera.rotation.set(pitch, -walker.yaw - Math.PI / 2, 0, 'YXZ');
-      renderer.render(scene, camera);
+      drawWorldAndWeapon();
     }
 
     // Once it has finished turning there is nothing left to animate.
@@ -2613,7 +2758,7 @@ function mountMaze(ctx) {
     killer = null;
     deathTurn = 0;
     recoil = 0;
-    if (gunMesh) gunMesh.visible = true;
+    if (gunRig) gunRig.visible = true;
     gameOver.hidden = true;
     health = PLAYER_HEALTH;
     kills = 0;
