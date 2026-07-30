@@ -198,7 +198,8 @@ that many squares, so it is barely retreading. (Preferring the *nearest*
 unvisited square sounds tidier and measured much worse: short hops mean it
 spends its time re-pathing and shuffling around one junction.)
 
-It moves at 2.05 squares a second against your 3.1 walking and 5.9 sprinting.
+It moves at 2.05 squares a second against your 2.5 walking and 4.25 sprinting —
+quicker than it, but not by much, and only while the bar lasts.
 It spawns at least eight squares away and never near the exit, so you are never
 made to walk into one to finish.
 
@@ -248,22 +249,52 @@ You carry 160 points and each of them carries 120.
   cannot flicker you in and out of a sprint. Standing still refills it: you pay
   for ground covered, not for holding a key down.
 
-Health and stamina come back in full at the start of each maze in the run.
+Health and stamina come back in full at the start of each maze in the run, and
+so does every magazine.
 
 **When one of them finishes you**, the view swings round onto whichever one
 actually had hold of you and your knees give way, then **YOU DIED** comes up
 over the top with a **Retry** button under it — or press Enter. The loop keeps
 running through that half-second rather than stopping dead, which is what lets
-the camera turn; nothing in the world moves while it does. Dying under mouse
-look releases the pointer, because there is no cursor to click Retry with
-otherwise, but it leaves you in fullscreen: you should not be thrown out of the
-game to restart.
+the camera turn; nothing in the world moves while it does.
+
+Dying under mouse look releases the pointer, because there is no cursor to
+click Retry with otherwise, but it leaves you in fullscreen: you should not be
+thrown out of the game to restart. Releasing it is only half the job — the
+click handler takes the pointer *back* whenever the view is clicked in
+fullscreen, so the first click after dying went to re-locking rather than to
+the button, and Retry needed an Esc first. It does not do that while you are
+down.
 
 ### The weapons
 
-Five to choose from — 9mm, Revolver, SMG, Shotgun, Sniper — all supplied
-models, in `weapons/`. They differ in looks only; every one of them shoots the
-same.
+Five of them — 9mm, Revolver, SMG, Shotgun, Sniper — all supplied models, in
+`weapons/`. **One gun per monster**: pick three and you carry the first three,
+switched with the number keys or the wheel, each keeping its own rounds.
+
+No two behave alike, and the 9mm is the yardstick the rest are set against:
+
+| | damage | to a kill | rate/s | reach | magazine | reload |
+|---|---|---|---|---|---|---|
+| **9mm** | 8 | 15 | 9.1 | 16 | 15 | 1.40s |
+| **Revolver** | 20 | 6 | 2.4 | 9 | 6 | 1.20s |
+| **SMG** | 5 | 24 | 16.7 | 11 | 32 | 1.00s |
+| **Shotgun** | 30 | 4 | 1.3 | 6 | 8 | 2.00s |
+| **Sniper** | 60 | 2 | 0.6 | 30 | 5 | 2.60s |
+
+The 9mm is the all-rounder — best at nothing, worst at nothing, and the only
+one holding enough to kill without stopping. The sniper hits hardest and
+reaches furthest but waits a second and a half between rounds. The shotgun
+needs four hits and six squares. The SMG hits softest and does not care. The
+revolver is quick to reload and slow to cock.
+
+Those characters are pinned by tests written against the 9mm rather than by
+rank — three of the five were asked for high damage, and only two can be in
+any top two.
+
+**Right-click brings the sights up**, narrowing the view from 95 degrees to 52
+and bringing the weapon onto the centre line; sway and recoil damp to a fifth
+while it is there. **R reloads**, and firing dry starts one by itself.
 
 The weapon is drawn in **a second pass over a cleared depth buffer**, in a
 little scene of its own with its own camera and lights. Simply turning depth

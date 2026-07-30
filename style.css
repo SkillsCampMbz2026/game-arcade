@@ -892,6 +892,62 @@ html:fullscreen {
   transform: scale(3.4);
 }
 
+/* Ammunition, bottom-right, opposite the gauges. */
+.ammo {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  pointer-events: none;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.95);
+}
+
+.ammo__name {
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(226, 232, 240, 0.8);
+}
+
+.ammo__count {
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.05;
+  color: #e8eefb;
+}
+
+.ammo.is-empty .ammo__count { color: #ef4444; }
+
+.ammo.is-reloading .ammo__count {
+  font-size: 0.9rem;
+  color: #fbbf24;
+  animation: gaugelow 0.6s ease-in-out infinite alternate;
+}
+
+/* One pip per gun carried, the one in hand lit. */
+.ammo__slots { display: flex; gap: 4px; margin-top: 3px; }
+
+.ammo__pip {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(226, 232, 240, 0.28);
+}
+
+.ammo__pip.is-held { background: var(--x); box-shadow: 0 0 8px var(--x); }
+
+/* With the sights up the weapon has its own; ours gets out of the way. */
+.sight.is-aiming::before,
+.sight.is-aiming::after { opacity: 0.25; }
+
+.sight::before,
+.sight::after { transition: background 0.1s, transform 0.12s, opacity 0.12s; }
+
 /* Death screen. Inside the viewport, so it is still there when you die in
    fullscreen — which is where most of the game gets played. */
 .gameover {

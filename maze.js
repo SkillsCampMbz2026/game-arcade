@@ -11,7 +11,7 @@
 
 const THREE_SRC = 'vendor/three.min.js';
 const MONSTER_MODEL = 'blue_monster.glb';
-const MONSTER_HEIGHT = 1.42;     // world units, kept under the 1.5 wall height
+const MONSTER_HEIGHT = 1.12;     // world units; it still looms over a 0.62 eye
 
 /* The model is authored with its arms straight out. Swung down at the shoulder
    they hang like the reference picture and, more to the point, the thing then
@@ -31,15 +31,57 @@ const MONSTER_SHOULDER = 1.15;   // radians
    the five came to 138 MB, of which 93% was normal, roughness and occlusion
    maps at up to 4096 square — none of which this renderer reads, for a thing
    that occupies a twentieth of the screen. */
+/* Each gun is its own answer to the same problem, and no two are good at the
+   same thing: damage a hit, seconds between shots, how far a round carries,
+   what it holds, and how long it takes to fill again.
+
+   Read down the "kill" column and every one of them can do the job — what
+   differs is how long it leaves you standing still to do it. */
 const MAZE_WEAPONS = [
-  { id: 'pistol', label: '9mm', file: 'weapons/pistol.glb', yaw: 0.1, pitch: 0.05, length: 0.28, at: [0.12, -0.11, -0.32] },
-  { id: 'revolver', label: 'Revolver', file: 'weapons/revolver.glb', yaw: 3.19, pitch: 0.05, length: 0.3, at: [0.12, -0.11, -0.33] },
-  { id: 'smg', label: 'SMG', file: 'weapons/smg.glb', yaw: 0.1, pitch: 0.05, length: 0.42, at: [0.12, -0.12, -0.34] },
-  { id: 'shotgun', label: 'Shotgun', file: 'weapons/shotgun.glb', yaw: 3.48, pitch: 0.05, length: 0.34, at: [0.13, -0.09, -0.32] },
-  { id: 'sniper', label: 'Sniper', file: 'weapons/sniper.glb', yaw: 1.6708, pitch: 0.05, length: 0.46, at: [0.12, -0.11, -0.34] },
+  /* 9mm — the all-rounder: never the best at anything, never the worst
+     either. Fifteen rounds to a kill and fifteen in the magazine, so it is the
+     one gun that can do the job without ever stopping to reload. */
+  {
+    id: 'pistol', label: '9mm', file: 'weapons/pistol.glb',
+    damage: 8, cooldown: 0.11, range: 16, ammo: 15, reload: 1.4,
+    yaw: 0, length: 0.28, at: [0.11, -0.10, -0.32],
+  },
+  // Revolver — hits hard and comes back quickly, but slow to cock and it
+  // will not reach: a gun for a corner, not a corridor.
+  {
+    id: 'revolver', label: 'Revolver', file: 'weapons/revolver.glb',
+    damage: 20, cooldown: 0.42, range: 9, ammo: 6, reload: 1.2,
+    yaw: Math.PI, length: 0.3, at: [0.11, -0.10, -0.33],
+  },
+  // SMG — least damage a round by a distance, and it does not care: fastest
+  // to fire, fastest to reload, and thirty-two of them to spend.
+  {
+    id: 'smg', label: 'SMG', file: 'weapons/smg.glb',
+    damage: 5, cooldown: 0.06, range: 11, ammo: 32, reload: 1,
+    yaw: 0, length: 0.42, at: [0.11, -0.11, -0.34],
+  },
+  // Shotgun — four shots to a kill, if you are close enough to smell it.
+  {
+    id: 'shotgun', label: 'Shotgun', file: 'weapons/shotgun.glb',
+    damage: 30, cooldown: 0.75, range: 6, ammo: 8, reload: 2,
+    yaw: Math.PI, length: 0.34, at: [0.12, -0.09, -0.32],
+  },
+  /* Sniper — two rounds down a corridor, and a long wait between them. That
+     wait is what stops it being simply the best gun in the game: at anything
+     quicker it killed faster than the SMG as well as reaching five times
+     further, and there would be no reason to carry anything else. */
+  {
+    id: 'sniper', label: 'Sniper', file: 'weapons/sniper.glb',
+    damage: 60, cooldown: 1.55, range: 30, ammo: 5, reload: 2.6,
+    yaw: Math.PI / 2, length: 0.46, at: [0.11, -0.10, -0.34],
+  },
 ];
 
-const weaponById = (id) => MAZE_WEAPONS.find((w) => w.id === id) || MAZE_WEAPONS[0];
+/* Where the weapon sits with the sights up: on the centre line, close to the
+   eye. Every one of them comes to the same place, which is the point — the
+   crosshair is where the round goes whatever you are holding. */
+const ADS_AT = [0, -0.13, -0.3];
+
 
 const BRICK_TEX = 256;   // texture edge, in pixels
 const FACE_TEX = 256;    // the creature's face, likewise
@@ -64,8 +106,8 @@ const courseById = (id) => MAZE_COURSES.find((c) => c.id === id) || MAZE_COURSES
 const MAZE_PACKS = [1, 2, 3, 4, 5];
 
 const WALKER_RADIUS = 0.26;    // in cells; keeps you off the wall faces
-const WALK_SPEED = 3.1;        // cells per second
-const SPRINT_MULTIPLIER = 1.9; // while space is held
+const WALK_SPEED = 2.5;        // cells per second
+const SPRINT_MULTIPLIER = 1.7; // while space is held
 const TURN_SPEED = 2.4;        // radians per second
 const MOUSE_SENSITIVITY = 0.0026;
 const MAX_PITCH = 0.9;         // radians you can look up or down
@@ -287,7 +329,7 @@ function stepWalker(maze, walker, input, dt) {
 
    Pure, like the walker: given a maze and a player it returns its new state,
    which is what makes the chase testable without a browser. */
-const MONSTER_SPEED = 2.05;      // cells per second; player walks 3.1
+const MONSTER_SPEED = 2.05;      // cells per second; you walk 2.5, sprint 4.25
 const MONSTER_REPATH = 0.35;     // seconds between route recalculations
 const MONSTER_REACH = 0.7;       // cells; how close before it can hit you
 const MONSTER_MIN_START = 8;     // squares of head start, at least
@@ -311,16 +353,24 @@ const HEAR_SPRINT = 5;           // cells, when you are running
 const SHOT_NOISE = 15;           // a gunshot carries a long way
 const LOSE_PATIENCE = 5;         // seconds spent chasing a stale sighting
 
-/* A fight, rather than one fatal touch. Six shots put one down; it needs the
-   better part of seven seconds of contact to finish you. */
+/* A fight, rather than one fatal touch. Fifteen shots put one down; it needs
+   the better part of seven seconds of contact to finish you. */
 const PLAYER_HEALTH = 160;
 const MONSTER_HEALTH = 120;
 const MONSTER_DAMAGE = 24;       // per second of contact
 const HEALTH_REGEN = 3;          // per second, only once it is far off
-const SHOT_DAMAGE = 20;          // six shots to a kill
-const SHOT_COOLDOWN = 0.38;      // seconds between shots
+/* The 9mm is the baseline every other gun is set against: eight a hit, so
+   fifteen rounds on target. The rest trade rate against damage against reach. */
+const SHOT_DAMAGE = 8;
+const SHOT_COOLDOWN = 0.09;      // barely a pause between rounds
 const SHOT_RANGE = 16;           // cells
 const AIM_ASSIST = 0.055;        // radians of forgiveness either side
+const RELOAD_TIME = 1.15;        // seconds
+
+/* Sights. Holding the right button narrows the view and brings the weapon up
+   in front of your eye; letting go swings it back out to the hip. */
+const ADS_FOV = 52;              // degrees, against the 95 you walk around with
+const ADS_SPEED = 9;             // how quickly it comes up and goes back down
 
 /* Sprinting now costs something. A full bar is a little under four seconds at
    a run, and refills in about seven at a walk. */
@@ -1002,7 +1052,8 @@ function drawRaycast(g, maze, walker, pitch, width, height, monsters, recoil = 0
     const spot = floorPoint(m.x, m.y);
     if (!spot || gap <= 0.05) continue;
     const camY = (EYE_HEIGHT / (spot.y - horizon)) * project;
-    const tall = (project / camY) * 1.45;
+    // The same height the model is scaled to, so both renderers agree.
+    const tall = (project / camY) * MONSTER_HEIGHT;
     drawCreature(g, spot.x, spot.y, tall * 0.42, tall, camY, depth, width, m.flinch);
   }
 
@@ -1496,6 +1547,9 @@ function paintFace(g, size) {
    trick as the creature's face — a plane pinned to the camera in 3D, a blit
    into the corner in the 2D fallback — so there is one drawing of it rather
    than two that drift. */
+/* Just the weapon — no hand, no arm. Every one of the five models is the gun
+   on its own, and a painted fist holding one of them while the others float
+   would be worse than no hand at all. */
 const GUN_PIXELS = [
   '................',
   '..S.............',
@@ -1509,10 +1563,10 @@ const GUN_PIXELS = [
   '.........gBBBb..',
   '.........gGGGb..',
   '........ggGGGG..',
-  '.......HHhGGGG..',
-  '......HHHHhGGa..',
-  '.....HHHHHhaaaa.',
-  '......HHHhaaaaaa',
+  '..........GGGG..',
+  '..........gGGb..',
+  '...........GG...',
+  '................',
 ];
 
 const GUN_INK = {
@@ -1523,9 +1577,6 @@ const GUN_INK = {
   '=': '#cbd3d8', // highlight along the top
   g: '#2f2a25',   // frame and trigger guard
   G: '#25201c',   // grip
-  H: '#d98324',   // glove
-  h: '#c2741f',   // glove, shaded
-  a: '#7c4a21',   // forearm
 };
 
 function paintGun(g, size) {
@@ -1754,6 +1805,7 @@ function loadMonsterModel() {
    from a file:// page a fetch of a sibling file is blocked outright, and the
    maze has to stay playable, so the caller falls back to the painted one. */
 const weaponLoads = new Map();
+const weaponReady = new Map();      // resolved models, for an instant swap
 
 function loadWeaponModel(weapon) {
   if (weaponLoads.has(weapon.id)) return weaponLoads.get(weapon.id);
@@ -1773,17 +1825,14 @@ function loadWeaponModel(weapon) {
     model.scale.setScalar(scale);
     inner.add(model);
 
-    const rig = new THREE.Group();
-    rig.add(inner);
-    rig.rotation.set(weapon.pitch || 0, weapon.yaw, 0, 'YXZ');
-    rig.position.set(weapon.at[0], weapon.at[1], weapon.at[2]);
-
-    // The offset has to be applied after the turn, not through it.
-    const held = new THREE.Group();
-    held.add(rig);
-    rig.position.set(0, 0, 0);
-    held.position.set(weapon.at[0], weapon.at[1], weapon.at[2]);
-    return held;
+    /* Turned to point away from you, and left at the origin: the rig that
+       holds it decides where it sits, so it can slide between the hip and the
+       eye without the offset being applied twice. */
+    const turned = new THREE.Group();
+    turned.add(inner);
+    turned.rotation.set(weapon.pitch || 0, weapon.yaw, 0, 'YXZ');
+    weaponReady.set(weapon.id, turned);
+    return turned;
   }).catch(() => null);
 
   weaponLoads.set(weapon.id, load);
@@ -1836,11 +1885,23 @@ function mountMaze(ctx) {
   let shotTimer = 0;                       // counts down to the next shot
   let flash = 0;                           // muzzle flash, seconds remaining
   let recoil = 0;                          // 1 the instant a shot goes off, easing to 0
-  let weapon = MAZE_WEAPONS[0];
+  /* One gun per monster: pick three and you carry three, switched with the
+     number keys or the wheel. Each keeps its own rounds, so swapping away from
+     an empty weapon and back again does not quietly refill it. */
+  let held = 0;                             // which of the loadout is in hand
+  let rounds = [];                          // rounds left, per weapon in the loadout
+  let reloading = 0;                        // seconds left of a reload
+  let aiming = false;                       // right button held
+  let firing = false;                       // left button held
+  let sights = 0;                           // 0 at the hip, 1 at the eye
   let gunScene = null;                      // the weapon is drawn in its own pass
   let gunCamera = null;
   let gunRig = null;                        // what sway and recoil move
   let gunModel = null;                      // the loaded weapon, once it arrives
+  const gunAt = [0, 0, 0];                  // where it sits, between hip and eye
+
+  const loadout = () => MAZE_WEAPONS.slice(0, packSize);
+  const weapon = () => loadout()[Math.min(held, packSize - 1)] || MAZE_WEAPONS[0];
   let killer = null;                        // whichever of them finished you
   let deathTurn = 0;                        // how far through looking at it
   const sprint = { value: STAMINA_MAX, active: false };
@@ -1894,14 +1955,9 @@ function mountMaze(ctx) {
     String(packSize), (id) => { packSize = Number(id); restart(); },
     { ariaLabel: 'How many monsters' });
 
-  const weaponRow = segmented(
-    MAZE_WEAPONS.map((w) => ({ id: w.id, label: w.label })),
-    weapon.id, (id) => { weapon = weaponById(id); fitWeapon(); },
-    { ariaLabel: 'Weapon' });
-
   const packNote = document.createElement('p');
   packNote.className = 'fieldnote';
-  packNote.textContent = 'How many are hunting you';
+  packNote.textContent = 'How many are hunting you — and how many guns you carry';
 
   const scoreRow = statRow([
     { key: 'level', label: 'Maze', value: '1', tone: 'x' },
@@ -1957,6 +2013,18 @@ function mountMaze(ctx) {
   const foeBar = meter('foe', 'Searching');
   const foeLabel = foeBar.label;
 
+  /* What you are holding, and what is left in it. Bottom-right, opposite the
+     gauges, where an ammunition count belongs. */
+  const ammoBox = document.createElement('div');
+  ammoBox.className = 'ammo';
+  const ammoName = document.createElement('span');
+  ammoName.className = 'ammo__name';
+  const ammoCount = document.createElement('span');
+  ammoCount.className = 'ammo__count';
+  const ammoSlots = document.createElement('span');
+  ammoSlots.className = 'ammo__slots';
+  ammoBox.append(ammoName, ammoCount, ammoSlots);
+
   const hud = document.createElement('div');
   hud.className = 'hud';
   hud.append(healthBar.el, sprintBar.el, foeBar.el);
@@ -1997,7 +2065,7 @@ function mountMaze(ctx) {
     healthBar.set(health / PLAYER_HEALTH);
     sprintBar.set(sprint.value / STAMINA_MAX, !sprint.active && sprint.value < SPRINT_FLOOR);
 
-    const aimed = pickTarget(maze, walker, monsters);
+    const aimed = pickTarget(maze, walker, monsters, weapon().range);
     const shown = aimed || nearestMonster(monsters, walker);
     const hunting = monsters.some((m) => !m.dead && m.mode === 'hunt');
     foeBar.set(shown ? shown.health / MONSTER_HEALTH : 0,
@@ -2006,8 +2074,29 @@ function mountMaze(ctx) {
     foeLabel.textContent = hunting ? 'Hunting' : 'Searching';
 
     sight.classList.toggle('is-firing', flash > 0);
-    sight.classList.toggle('is-ready', shotTimer <= 0);
+    sight.classList.toggle('is-ready', shotTimer <= 0 && reloading <= 0);
     sight.classList.toggle('is-on-target', Boolean(aimed));
+    // Out of the way while the sights are up: it is the gun's own sight then.
+    sight.classList.toggle('is-aiming', sights > 0.5);
+
+    const gun = weapon();
+    const left = rounds[held] === undefined ? gun.ammo : rounds[held];
+    const count = reloading > 0 ? 'reloading…' : `${left} / ${gun.ammo}`;
+    // Sixty times a second, so only touch the DOM when it actually changes.
+    if (ammoName.textContent !== gun.label) ammoName.textContent = gun.label;
+    if (ammoCount.textContent !== count) ammoCount.textContent = count;
+    ammoBox.classList.toggle('is-empty', !left && reloading <= 0);
+    ammoBox.classList.toggle('is-reloading', reloading > 0);
+
+    // One pip per gun you are carrying, the one in hand lit.
+    if (ammoSlots.childElementCount !== packSize) {
+      ammoSlots.replaceChildren(...loadout().map(() => {
+        const pip = document.createElement('i');
+        pip.className = 'ammo__pip';
+        return pip;
+      }));
+    }
+    [...ammoSlots.children].forEach((pip, i) => pip.classList.toggle('is-held', i === held));
   }
 
   // Shown in place of the 3D view when it cannot start.
@@ -2018,7 +2107,7 @@ function mountMaze(ctx) {
     return note;
   }
 
-  ctx.settings.append(courseRow.el, packRow.el, packNote, weaponRow.el);
+  ctx.settings.append(courseRow.el, packRow.el, packNote);
   ctx.score.append(scoreRow.el);
   const fireRow = document.createElement('div');
   fireRow.className = 'holdrow';
@@ -2035,7 +2124,7 @@ function mountMaze(ctx) {
   // page, so going fullscreen also grabs the pointer for mouse look.
   ctx.setFullscreenTarget(view);
   ctx.setTheme('maze');
-  ctx.setHint('W S walk · A D strafe · space sprint (loud!) · click or F to shoot · ⛶ mouse look');
+  ctx.setHint('WASD move · space sprint · click fire · right-click aim · R reload · 1-5 swap · ⛶ mouse look');
 
   function setInput(dir, down) {
     if (dir === 'up') input.forward = down;
@@ -2323,14 +2412,24 @@ function mountMaze(ctx) {
      answer for the weapon still selected is used. */
   function fitWeapon() {
     if (!gunRig) return;
-    const wanted = weapon;
+    const wanted = weapon();
 
     gunRig.clear();
     gunModel = null;
+
+    // Already fetched: swap straight to it rather than flashing the painted
+    // one for a frame every time you change weapon.
+    const ready = weaponReady.get(wanted.id);
+    if (ready) {
+      gunModel = ready.clone(true);
+      gunRig.add(gunModel);
+      return;
+    }
+
     gunRig.add(paintedGun());
 
     loadWeaponModel(wanted).then((model) => {
-      if (destroyed || !gunRig || weapon !== wanted || !model) return;
+      if (destroyed || !gunRig || weapon() !== wanted || !model) return;
       gunModel = model.clone(true);
       gunRig.clear();
       gunRig.add(gunModel);
@@ -2345,8 +2444,7 @@ function mountMaze(ctx) {
       new THREE.MeshBasicMaterial({
         map: makeTextures().gun, transparent: true, depthWrite: false, fog: false,
       }));
-    plane.position.set(0.16, -0.155, -0.34);
-    return plane;
+    return plane;      // the rig positions it, the same as a model
   }
 
   // three.js does not free GPU buffers on its own; rebuilding a maze every
@@ -2435,9 +2533,9 @@ function mountMaze(ctx) {
     flatCanvas = document.createElement('canvas');
     flatCanvas.className = 'viewport__canvas';
     flat = flatCanvas.getContext('2d');
-    view.replaceChildren(flatCanvas, minimap, hud, sight, gameOver);
+    view.replaceChildren(flatCanvas, minimap, hud, ammoBox, sight, gameOver);
     resize();
-    ctx.setHint('W S walk · A D strafe · space sprint (loud!) · click or F to shoot · ⛶ mouse look');
+    ctx.setHint('WASD move · space sprint · click fire · right-click aim · R reload · 1-5 swap · ⛶ mouse look');
     ctx.setStatus(`${reason} Playing in 2D instead.`);
     loadLevel();
     start();
@@ -2478,8 +2576,22 @@ function mountMaze(ctx) {
     if (!courseDone && !dead) seconds += dt;
 
     shotTimer = Math.max(0, shotTimer - dt);
+    if (firing) fire();          // holding the trigger keeps it going
     flash = Math.max(0, flash - dt);
     recoil = Math.max(0, recoil - dt * 5.5);   // kicks instantly, settles over ~180 ms
+
+    if (reloading > 0) {
+      reloading = Math.max(0, reloading - dt);
+      if (reloading === 0) {
+        rounds[held] = weapon().ammo;
+        audio.play('place');
+        refreshBars(0);
+      }
+    }
+
+    // The sights come up and go back down over about a tenth of a second.
+    const want = aiming && !dead && !reloading ? 1 : 0;
+    sights += (want - sights) * Math.min(1, dt * ADS_SPEED);
 
     const closest = nearestMonster(monsters, walker);
     const near = closest ? monsterCloseness(closest, walker) : 0;
@@ -2537,12 +2649,27 @@ function mountMaze(ctx) {
     });
 
     if (gunRig) {
-      // Sways with the walk, kicks down and back on every shot.
+      /* Two places the weapon can be — at the hip and at the eye — and it
+         slides between them. Sway and recoil are damped right down while the
+         sights are up, or aiming would be no steadier than not. */
+      const hip = weapon().at;
+      const steady = 1 - sights * 0.8;
+      for (let i = 0; i < 3; i++) gunAt[i] = hip[i] + (ADS_AT[i] - hip[i]) * sights;
+
       gunRig.position.set(
-        Math.sin(bob * 0.5) * 0.006 + recoil * 0.022,
-        Math.cos(bob) * 0.005 - recoil * 0.05,
-        recoil * 0.045);
-      gunRig.rotation.set(recoil * 0.28, 0, -recoil * 0.1);
+        gunAt[0] + (Math.sin(bob * 0.5) * 0.006 + recoil * 0.022) * steady,
+        gunAt[1] + (Math.cos(bob) * 0.005 - recoil * 0.05) * steady,
+        gunAt[2] + recoil * 0.045 * steady);
+      gunRig.rotation.set(recoil * 0.28 * steady, 0, -recoil * 0.1 * steady);
+    }
+
+    // Narrowing the view is most of what aiming down a sight actually does.
+    if (camera) {
+      const fov = MAZE_FOV + (ADS_FOV - MAZE_FOV) * sights;
+      if (Math.abs(camera.fov - fov) > 0.01) {
+        camera.fov = fov;
+        camera.updateProjectionMatrix();
+      }
     }
 
     if (flat) {
@@ -2636,9 +2763,10 @@ function mountMaze(ctx) {
     /* Release the pointer, or the Retry button cannot be clicked: under pointer
        lock there is no cursor to click it with. Fullscreen itself is left
        alone — you should not be thrown out of the game to restart. */
-    if (document.exitPointerLock && document.pointerLockElement === view) {
-      document.exitPointerLock();
-    }
+    if (document.exitPointerLock) document.exitPointerLock();
+    mouseLook = false;
+    firing = false;
+    aiming = false;
 
     goneLine.textContent =
       `Maze ${level + 1} of ${course.levels.length} · ${clock(seconds)}` +
@@ -2649,12 +2777,42 @@ function mountMaze(ctx) {
     ctx.setStatus(`It got you on maze ${level + 1} of ${course.levels.length} · ${clock(seconds)}`, false);
   }
 
+  // Take out a different gun. Each keeps whatever it had left in it.
+  function takeOut(index) {
+    const next = Math.max(0, Math.min(packSize - 1, index));
+    if (next === held || dead) return;
+    held = next;
+    reloading = 0;
+    audio.play('click');
+    fitWeapon();
+    refreshBars(0);
+  }
+
+  // Refill whatever is in your hands. There is no shortage of ammunition —
+  // the magazine is the limit, not the supply.
+  function reload() {
+    if (dead || courseDone || reloading > 0) return;
+    if (rounds[held] >= weapon().ammo) return;
+    reloading = weapon().reload;
+    audio.play('drop');
+  }
+
   /* Firing. Hitscan, so the shot lands or misses the instant you pull the
-     trigger; the rate of fire is what stops you emptying a hundred points into
-     it in half a second. */
+     trigger. */
   function fire() {
-    if (dead || courseDone || shotTimer > 0) return;
-    shotTimer = SHOT_COOLDOWN;
+    if (dead || courseDone || shotTimer > 0 || reloading > 0) return;
+
+    // Out of rounds: a dry click, and it starts reloading by itself.
+    if (!rounds[held]) {
+      shotTimer = weapon().cooldown;
+      audio.play('click');
+      reload();
+      return;
+    }
+
+    const gun = weapon();
+    rounds[held] -= 1;
+    shotTimer = gun.cooldown;
     flash = 0.07;
     recoil = 1;
     audio.play('shot');
@@ -2662,12 +2820,13 @@ function mountMaze(ctx) {
     // Loud. Everything within earshot now knows exactly where you fired from.
     alertMonsters(monsters, walker);
 
-    // Whichever of them is nearest along the line you are pointing.
-    const target = pickTarget(maze, walker, monsters);
+    // Whichever of them is nearest along the line you are pointing, and inside
+    // this gun's reach — a shotgun simply cannot touch what a sniper can.
+    const target = pickTarget(maze, walker, monsters, gun.range);
     if (!target) return;
 
     audio.play('impact');
-    target.health -= SHOT_DAMAGE;
+    target.health -= gun.damage;
     target.flinch = 0.22;
 
     if (target.health > 0) {
@@ -2719,6 +2878,10 @@ function mountMaze(ctx) {
     walker = createWalker(maze);
     monsters = Array.from({ length: packSize },
       () => createMonster(maze, walker));
+    // A gun apiece, all of them loaded.
+    rounds = loadout().map((w) => w.ammo);
+    held = Math.min(held, packSize - 1);
+    reloading = 0;
     health = PLAYER_HEALTH;
     sprint.value = STAMINA_MAX;
     refreshBars(0);
@@ -2758,6 +2921,10 @@ function mountMaze(ctx) {
     killer = null;
     deathTurn = 0;
     recoil = 0;
+    held = 0;
+    reloading = 0;
+    aiming = false;
+    sights = 0;
     if (gunRig) gunRig.visible = true;
     gameOver.hidden = true;
     health = PLAYER_HEALTH;
@@ -2773,7 +2940,7 @@ function mountMaze(ctx) {
     loadLevel();
 
     if (!renderer && !flat) return;     // still loading
-    if (renderer) view.replaceChildren(renderer.domElement, minimap, hud, sight, gameOver);
+    if (renderer) view.replaceChildren(renderer.domElement, minimap, hud, ammoBox, sight, gameOver);
     resize();
     ctx.setStatus(`${whereAmI()} — find the way out`);
     start();
@@ -2791,14 +2958,26 @@ function mountMaze(ctx) {
   };
 
   function onKeyDown(event) {
+    // Enter restarts once you are down; R reloads while you are still up.
     if (dead && (event.key === 'Enter' || event.key === 'r' || event.key === 'R')) {
       event.preventDefault();
       restart();
       return;
     }
+    if (event.key === 'r' || event.key === 'R') {
+      event.preventDefault();
+      reload();
+      return;
+    }
     if (event.key === 'f' || event.key === 'F') {
       event.preventDefault();
       fire();
+      return;
+    }
+    // Number keys take out the matching gun, when you are carrying that many.
+    if (event.key >= '1' && event.key <= '5') {
+      event.preventDefault();
+      takeOut(Number(event.key) - 1);
       return;
     }
     const dir = KEYS[event.key];
@@ -2824,7 +3003,7 @@ function mountMaze(ctx) {
   }
 
   function onFullscreenChange() {
-    if (inFullscreen()) {
+    if (inFullscreen() && !dead) {
       if (view.requestPointerLock) view.requestPointerLock();
     } else if (document.exitPointerLock && document.pointerLockElement === view) {
       document.exitPointerLock();
@@ -2850,15 +3029,45 @@ function mountMaze(ctx) {
   // Clicking the view while already fullscreen re-grabs the pointer, which is
   // what players expect after pressing Esc once.
   view.addEventListener('mousedown', (event) => {
+    if (event.button === 2) {                 // right: bring the sights up
+      event.preventDefault();
+      aiming = true;
+      return;
+    }
     if (event.button !== 0) return;
-    if (inFullscreen() && !mouseLook) {
+
+    /* Not while you are dead. Releasing the pointer on death is no use if the
+       very next click grabs it straight back — that is what made Retry need an
+       Esc first, because the click never reached the button. */
+    if (inFullscreen() && !mouseLook && !dead) {
       // The click that takes the pointer back should not also cost a round.
       if (view.requestPointerLock) view.requestPointerLock();
       return;
     }
+    if (dead) return;
     event.preventDefault();
+    firing = true;
     fire();
   });
+
+  // Released anywhere, not just over the view: drag off it holding a button
+  // and the game would otherwise think it is still held.
+  function onMouseUp(event) {
+    if (event.button === 2) aiming = false;
+    if (event.button === 0) firing = false;
+  }
+
+  // Holding the left button keeps firing, at whatever the weapon's rate is.
+  function onWheel(event) {
+    if (!running || dead) return;
+    event.preventDefault();
+    takeOut((held + (event.deltaY > 0 ? 1 : -1) + packSize) % packSize);
+  }
+
+  // Right-clicking a game should aim, not open a menu over it.
+  view.addEventListener('contextmenu', (event) => event.preventDefault());
+  view.addEventListener('wheel', onWheel, { passive: false });
+  window.addEventListener('mouseup', onMouseUp);
 
   document.addEventListener('fullscreenchange', onFullscreenChange);
   document.addEventListener('pointerlockchange', onPointerLockChange);
@@ -2908,6 +3117,7 @@ function mountMaze(ctx) {
       stop();
       window.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('mouseup', onMouseUp);
       document.removeEventListener('fullscreenchange', onFullscreenChange);
       document.removeEventListener('pointerlockchange', onPointerLockChange);
       document.removeEventListener('mousemove', onMouseMove);
@@ -2942,5 +3152,6 @@ if (typeof module !== 'undefined') {
     MONSTER_SPEED, MONSTER_MIN_START, MONSTER_REACH, MONSTER_DAMAGE, RESPAWN_MIN,
     PLAYER_HEALTH, MONSTER_HEALTH, SHOT_DAMAGE, SHOT_RANGE,
     STAMINA_MAX, SPRINT_DRAIN, STAMINA_REGEN, SPRINT_FLOOR,
+    MAZE_WEAPONS, SHOT_COOLDOWN, RELOAD_TIME, ADS_FOV, MONSTER_HEIGHT,
   };
 }
