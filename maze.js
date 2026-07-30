@@ -656,8 +656,8 @@ function drawRaycast(g, maze, walker, pitch, width, height, monsters, recoil = 0
   for (let i = 0; i < 40; i++) {
     star = (star * 1664525 + 1013904223) >>> 0;
     const sx = star % width;
-    const sy = (star >> 8) % Math.max(1, Math.floor(horizon * 0.4));
-    g.fillStyle = `rgba(255, 255, 255, ${0.2 + ((star >> 20) % 40) / 100})`;
+    const sy = (star >>> 8) % Math.max(1, Math.floor(horizon * 0.4));
+    g.fillStyle = `rgba(255, 255, 255, ${0.2 + ((star >>> 20) % 40) / 100})`;
     g.fillRect(sx, sy, 1, 1);
   }
 
@@ -910,7 +910,7 @@ const speckle = (g, x, y, w, h, count, alpha) => {
   for (let i = 0; i < count; i++) {
     n = (n * 1664525 + 1013904223) >>> 0;
     const px = x + (n % w);
-    const py = y + ((n >> 9) % h);
+    const py = y + ((n >>> 9) % h);
     g.fillRect(px, py, 1, 1);
   }
 };
@@ -951,8 +951,8 @@ function paintBrick(g, size) {
     for (let i = -1; i < cols + 1; i++) {
       const x = Math.round((i + offset) * brickW);
       const y = Math.round(row * brickH);
-      const w = Math.round(brickW) - 3;
-      const h = Math.round(brickH) - 3;
+      const w = Math.max(1, Math.round(brickW) - 3);
+      const h = Math.max(1, Math.round(brickH) - 3);
       const rn = jitter(row, i);
       const rn2 = jitter(i, row + 31);
 
@@ -970,7 +970,7 @@ function paintBrick(g, size) {
       speckle(g, x + 2, y + 2, Math.max(1, w), Math.max(1, h), 18, offWhite ? 0.8 : 0.55);
 
       // A wash of blotching across the face, so no brick is one flat colour.
-      for (let b = 0; b < 3; b++) {
+      for (let b = 0; b < 3 && w > 3 && h > 3; b++) {
         const bn = jitter(row * 7 + b, i * 5);
         const bm = jitter(i * 11 + b, row * 3);
         g.fillStyle = `rgba(${bn > 0.5 ? 255 : 92}, ${bn > 0.5 ? 253 : 96}, ${bn > 0.5 ? 246 : 104}, 0.07)`;
@@ -1063,7 +1063,7 @@ function paintFloor(g, size) {
     for (let tx = 0; tx < cells; tx++) {
       const x = tx * step + 2;
       const y = ty * step + 2;
-      const w = step - 4;
+      const w = Math.max(1, step - 4);
       const n = jitter(tx, ty);
       const n2 = jitter(tx + 17, ty + 5);
 
@@ -1075,7 +1075,7 @@ function paintFloor(g, size) {
       g.fillRect(x, y, w, w);
 
       // Blotching across the face, at a bigger scale than the grain.
-      for (let b = 0; b < 4; b++) {
+      for (let b = 0; b < 4 && w > 3; b++) {
         const bn = jitter(tx * 13 + b, ty * 7);
         const bm = jitter(ty * 11 + b, tx * 3);
         g.fillStyle = bn > 0.5
@@ -1152,11 +1152,11 @@ function paintSky(g, size) {
   for (let i = 0; i < 140; i++) {
     n = (n * 1664525 + 1013904223) >>> 0;
     const x = n % size;
-    const y = (n >> 7) % Math.floor(size * 0.34);
+    const y = (n >>> 7) % Math.floor(size * 0.34);
     const high = 1 - y / (size * 0.34);
-    const bright = (0.15 + ((n >> 20) % 50) / 100) * high;
+    const bright = (0.15 + ((n >>> 20) % 50) / 100) * high;
     g.fillStyle = `rgba(255, 255, 255, ${bright})`;
-    const big = ((n >> 15) % 100) > 94;
+    const big = ((n >>> 15) % 100) > 94;
     if (big) {
       // A handful get a cross of light rather than a single pixel.
       g.fillRect(x - 1, y, 3, 1);
@@ -1189,17 +1189,17 @@ function paintSky(g, size) {
   for (let i = 0; i < 18; i++) {
     c = (c * 1664525 + 1013904223) >>> 0;
     const cx = c % size;
-    const cy = size * 0.36 + ((c >> 8) % Math.floor(size * 0.46));
-    const cw = 42 + ((c >> 16) % 96);
+    const cy = size * 0.36 + ((c >>> 8) % Math.floor(size * 0.46));
+    const cw = 42 + ((c >>> 16) % 96);
     const warmth = Math.min(1, Math.max(0, (cy / size - 0.36) / 0.46));
     const lobes = [];
     for (let lobe = 0; lobe < 6; lobe++) {
       c = (c * 1664525 + 1013904223) >>> 0;
       lobes.push([
         (lobe / 5 - 0.5) * cw * 1.7,
-        ((c >> 4) % 11) - 5,
-        cw * (0.26 + ((c >> 12) % 32) / 100),
-        0.14 + ((c >> 22) % 12) / 100,
+        ((c >>> 4) % 11) - 5,
+        cw * (0.26 + ((c >>> 12) % 32) / 100),
+        0.14 + ((c >>> 22) % 12) / 100,
       ]);
     }
 
@@ -1479,11 +1479,11 @@ function paintFur(g, size) {
   for (let i = 0; i < 900; i++) {
     n = (n * 1664525 + 1013904223) >>> 0;
     const x = n % size;
-    const y = (n >> 9) % size;
-    const len = 8 + ((n >> 18) % 34);
-    const tone = (n >> 5) % 4;
+    const y = (n >>> 9) % size;
+    const len = 8 + ((n >>> 18) % 34);
+    const tone = (n >>> 5) % 4;
     g.fillStyle = ['#2b7fc9', '#14507f', '#3a97dd', '#0f4272'][tone];
-    g.fillRect(x, y, 1 + ((n >> 22) % 2), len);
+    g.fillRect(x, y, 1 + ((n >>> 22) % 2), len);
   }
 }
 
@@ -2669,6 +2669,7 @@ if (typeof module !== 'undefined') {
     MAZE_COURSES, courseById, WALKER_RADIUS, WALK_SPEED, TURN_SPEED, SPRINT_MULTIPLIER,
     drawRaycast, drawMinimap, drawGun, cellKey, keyX, keyY, MAZE_FOV, WALL_HEIGHT, EYE_HEIGHT,
     makeTextures, drawCreature, createMonster, respawnMonster, spawnSpot,
+    paintBrick, paintBrickNormal, paintCap, paintFloor, paintFur, paintFace, paintGun, paintSky,
     stepMonster, monsterCloseness, pickTarget, nearestMonster,
     shotHits, clearLine, stepSprint, MAZE_PACKS,
     MONSTER_SPEED, MONSTER_MIN_START, MONSTER_REACH, MONSTER_DAMAGE, RESPAWN_MIN,
