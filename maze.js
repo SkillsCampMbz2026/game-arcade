@@ -269,6 +269,24 @@ const MONSTER_REACH = 0.7;       // cells; how close before it can hit you
 const MONSTER_MIN_START = 8;     // squares of head start, at least
 const RESPAWN_MIN = 14;          // and further still when it comes back
 
+/* It does not know where you are.
+
+   It walks the maze looking, and only comes after you when it has a reason to:
+   it sees you down an open line within its own field of view, it hears you
+   moving close by, or you fire. What it then chases is the square it last had
+   you in — not wherever you happen to be — so breaking line of sight and
+   moving is a real escape rather than a delay.
+
+   Running is loud. Sprinting doubles the distance at which it hears you, which
+   is what makes the sprint bar a decision rather than a free button. */
+const SIGHT_RANGE = 9;           // cells it can pick you out at
+const SIGHT_CONE = 1.05;         // radians either side of where it is looking
+const SIGHT_CLOSE = 1.3;         // inside this it notices you whatever way it faces
+const HEAR_WALK = 2.2;           // cells
+const HEAR_SPRINT = 5;           // cells, when you are running
+const SHOT_NOISE = 15;           // a gunshot carries a long way
+const LOSE_PATIENCE = 5;         // seconds spent chasing a stale sighting
+
 /* A fight, rather than one fatal touch. Six shots put one down; it needs the
    better part of seven seconds of contact to finish you. */
 const PLAYER_HEALTH = 160;
@@ -321,6 +339,12 @@ function createMonster(maze, walker, rng = Math.random, minGap = MONSTER_MIN_STA
     yaw: 0,
     path: [],
     sinceRepath: MONSTER_REPATH,   // work out a route on the first step
+    pathTo: null,
+    mode: 'search',                // 'search' until it has a reason to hunt
+    target: null,                  // the square it is walking to
+    lastKnown: null,               // where it last had you
+    checked: new Set(),            // squares it has already looked at
+    patience: 0,                   // seconds left chasing a stale sighting
     health: MONSTER_HEALTH,
     dead: false,
     touching: false,
@@ -337,6 +361,12 @@ function respawnMonster(maze, walker, monster, rng = Math.random, minGap = RESPA
   monster.y = spot.y + 0.5;
   monster.path = [];
   monster.sinceRepath = MONSTER_REPATH;
+  monster.pathTo = null;
+  monster.mode = 'search';
+  monster.target = null;
+  monster.lastKnown = null;
+  monster.patience = 0;
+  monster.checked = new Set();
   monster.health = MONSTER_HEALTH;
   monster.dead = false;
   monster.touching = false;
@@ -373,22 +403,146 @@ function nearestMonster(monsters, walker) {
   return best;
 }
 
-function stepMonster(maze, monster, walker, dt) {
+/* Every open square in the maze, worked out once and kept on the maze itself.
+   The searchers ask for a random one whenever they finish a sweep, and scanning
+   eleven thousand squares each time they do adds up. */
+function openCells(maze) {
+  if (maze.openCells) return maze.openCells;
+
+  const cells = [];
+  for (let y = 1; y < maze.h - 1; y++) {
+    for (let x = 1; x < maze.w - 1; x++) {
+      if (!isWall(maze, x, y)) cells.push({ x, y });
+    }
+  }
+  maze.openCells = cells;
+  return cells;
+}
+
+/* Somewhere else to go and look.
+
+   It remembers the squares it has already walked and heads for a distant one it
+   has not, so each leg is a long traverse through territory it has not seen.
+   Preferring the nearest unvisited square instead sounds tidier and measured
+   far worse — short hops mean it spends its time re-pathing and shuffling
+   around one junction rather than covering ground.
+
+   Once most of the maze has been seen the memory is wiped and it starts again,
+   so it never runs out of anywhere to go. */
+function pickSearchTarget(maze, monster, rng = Math.random) {
+  const cells = openCells(maze);
+  if (!cells.length) return null;
+
+  if (!monster.checked) monster.checked = new Set();
+  if (monster.checked.size > cells.length * 0.7) monster.checked.clear();
+
+  let best = null;
+  let bestScore = -Infinity;
+  // Sampling rather than sorting: the maze can be eleven thousand squares.
+  for (let i = 0; i < 24; i++) {
+    const cell = cells[Math.floor(rng() * cells.length)];
+    const gap = Math.abs(cell.x - monster.x) + Math.abs(cell.y - monster.y);
+    if (gap < 2) continue;                    // not the square it is stood on
+    const fresh = monster.checked.has(cellKey(cell.x, cell.y)) ? 0 : 1;
+    const score = fresh * 1000 + gap;         // somewhere new, and a good walk away
+    if (score > bestScore) { bestScore = score; best = cell; }
+  }
+  return best;
+}
+
+/* Can it see you? Down an open line, inside its range, and within the arc it is
+   actually facing — except at arm's length, where it hardly matters which way
+   it happens to be looking. */
+function monsterSees(maze, monster, walker) {
+  const dx = walker.x - monster.x;
+  const dy = walker.y - monster.y;
+  const gap = Math.hypot(dx, dy);
+
+  if (gap > SIGHT_RANGE) return false;
+  if (!clearLine(maze, monster.x, monster.y, walker.x, walker.y)) return false;
+  if (gap <= SIGHT_CLOSE) return true;
+
+  const off = Math.atan2(dy, dx) - monster.yaw;
+  return Math.abs(Math.atan2(Math.sin(off), Math.cos(off))) <= SIGHT_CONE;
+}
+
+// Can it hear you? Walls muffle but do not silence, so this ignores them.
+function monsterHears(monster, walker, sprinting) {
+  const gap = Math.hypot(walker.x - monster.x, walker.y - monster.y);
+  return gap <= (sprinting ? HEAR_SPRINT : HEAR_WALK);
+}
+
+// Remember where you were, and go there.
+function markSeen(monster, walker) {
+  monster.mode = 'hunt';
+  monster.lastKnown = { x: Math.floor(walker.x), y: Math.floor(walker.y) };
+  monster.patience = LOSE_PATIENCE;
+  return monster;
+}
+
+// A shot tells everything within earshot exactly where you were standing.
+function alertMonsters(monsters, walker, range = SHOT_NOISE) {
+  let woken = 0;
+  for (const monster of monsters || []) {
+    if (monster.dead) continue;
+    if (Math.hypot(walker.x - monster.x, walker.y - monster.y) > range) continue;
+    markSeen(monster, walker);
+    woken += 1;
+  }
+  return woken;
+}
+
+function stepMonster(maze, monster, walker, dt, options = {}) {
   monster.flinch = Math.max(0, monster.flinch - dt);
   if (monster.dead || walker.escaped) {
     monster.touching = false;
     return monster;
   }
 
+  const rng = options.rng || Math.random;
+
+  /* Senses first. Being seen or heard refreshes where it thinks you are; losing
+     both starts the clock running down on that guess. */
+  if (monsterSees(maze, monster, walker) || monsterHears(monster, walker, options.sprinting)) {
+    markSeen(monster, walker);
+  } else if (monster.mode === 'hunt') {
+    monster.patience -= dt;
+    const spot = monster.lastKnown;
+    const arrived = !spot
+      || Math.hypot(monster.x - (spot.x + 0.5), monster.y - (spot.y + 0.5)) < 0.6;
+    // Nothing here, and no more patience for it: back to looking.
+    if (arrived || monster.patience <= 0) {
+      monster.mode = 'search';
+      monster.lastKnown = null;
+      monster.target = null;
+    }
+  }
+
+  // Somewhere new to look, once it has finished with the last place.
+  if (monster.mode === 'search') {
+    const spot = monster.target;
+    const done = !spot
+      || Math.hypot(monster.x - (spot.x + 0.5), monster.y - (spot.y + 0.5)) < 0.6;
+    if (done) monster.target = pickSearchTarget(maze, monster, rng);
+  }
+
+  const goal = monster.mode === 'hunt' ? monster.lastKnown : monster.target;
+  if (!goal) {
+    monster.touching = false;
+    return monster;
+  }
+
+  // Re-path on the timer, when the path runs out, or when the goal has moved.
+  const goalKey = goal.y * MAZE_STRIDE + goal.x;
   monster.sinceRepath += dt;
-  if (monster.sinceRepath >= MONSTER_REPATH
+  if (monster.sinceRepath >= MONSTER_REPATH || monster.pathTo !== goalKey
     || (monster.path.length === 0 && monster.sinceRepath >= MONSTER_REPATH * 0.25)) {
     monster.sinceRepath = 0;
-    const route = solveMaze(
-      maze,
-      { x: Math.floor(monster.x), y: Math.floor(monster.y) },
-      { x: Math.floor(walker.x), y: Math.floor(walker.y) });
+    monster.pathTo = goalKey;
+    const route = solveMaze(maze, { x: Math.floor(monster.x), y: Math.floor(monster.y) }, goal);
     monster.path = route ? route.slice(1) : [];
+    // Nowhere to go: pick somewhere else rather than standing there.
+    if (!monster.path.length && monster.mode === 'search') monster.target = null;
   }
 
   let budget = MONSTER_SPEED * dt;
@@ -399,16 +553,17 @@ function stepMonster(maze, monster, walker, dt) {
     const dx = tx - monster.x;
     const dy = ty - monster.y;
     const gap = Math.hypot(dx, dy);
+    if (gap > 1e-6) monster.yaw = Math.atan2(dy, dx);   // it looks where it walks
 
     if (gap <= budget) {          // reached this square, move on to the next
       monster.x = tx;
       monster.y = ty;
       budget -= gap;
       monster.path.shift();
+      if (monster.checked) monster.checked.add(cellKey(tx, ty));
     } else {
       monster.x += (dx / gap) * budget;
       monster.y += (dy / gap) * budget;
-      monster.yaw = Math.atan2(dy, dx);
       budget = 0;
     }
   }
@@ -1305,115 +1460,64 @@ function paintFace(g, size) {
   }
 }
 
-/* The gun, as you hold it: seen from behind and above, angled up and to the
-   left out of the bottom-right corner of the screen.
+/* The gun, as you hold it: seen from behind and above, pointing away up and to
+   the left out of the bottom-right corner of the screen.
 
-   Painted on a transparent square and used by both renderers, the same trick as
-   the face — a plane pinned to the camera in 3D, a blit into the corner in the
-   2D fallback — so there is one drawing of it rather than two that drift. */
+   Drawn blocky on purpose — laid out on a coarse grid as a character map, one
+   filled square per cell, no curves and no gradients. Reading it off a picture
+   rather than out of a list of drawing calls makes it far easier to change: to
+   move the sight, move the S.
+
+   Painted once onto a transparent square and used by both renderers, the same
+   trick as the creature's face — a plane pinned to the camera in 3D, a blit
+   into the corner in the 2D fallback — so there is one drawing of it rather
+   than two that drift. */
+const GUN_PIXELS = [
+  '................',
+  '..S.............',
+  '.MSS............',
+  '.MM=BB..........',
+  '..MMBBBB........',
+  '...=bBBBBB......',
+  '....==bBBBBB....',
+  '......==bBBBb...',
+  '........==BBBb..',
+  '.........gBBBb..',
+  '.........gGGGb..',
+  '........ggGGGG..',
+  '.......HHhGGGG..',
+  '......HHHHhGGa..',
+  '.....HHHHHhaaaa.',
+  '......HHHhaaaaaa',
+];
+
+const GUN_INK = {
+  S: '#3d4348',   // front sight
+  M: '#1b1f23',   // muzzle
+  B: '#a8b1b7',   // slide, lit
+  b: '#5c646a',   // slide, shaded
+  '=': '#cbd3d8', // highlight along the top
+  g: '#2f2a25',   // frame and trigger guard
+  G: '#25201c',   // grip
+  H: '#d98324',   // glove
+  h: '#c2741f',   // glove, shaded
+  a: '#7c4a21',   // forearm
+};
+
 function paintGun(g, size) {
-  const u = size / 100;                          // work in percentages of the square
-  const metal = (x0, y0, x1, y1, top, bottom) => {
-    const grad = g.createLinearGradient(x0 * u, y0 * u, x1 * u, y1 * u);
-    grad.addColorStop(0, top);
-    grad.addColorStop(0.45, bottom);
-    grad.addColorStop(1, top);
-    return grad;
-  };
+  const cells = GUN_PIXELS.length;
+  const step = size / cells;
 
-  // Forearm and glove, coming in from the bottom-right corner.
-  g.fillStyle = '#7c4a21';
-  g.beginPath();
-  g.moveTo(72 * u, 100 * u);
-  g.lineTo(100 * u, 100 * u);
-  g.lineTo(100 * u, 62 * u);
-  g.lineTo(62 * u, 84 * u);
-  g.closePath();
-  g.fill();
-
-  // Grip, angled back into the hand.
-  g.fillStyle = '#25201c';
-  g.beginPath();
-  g.moveTo(46 * u, 52 * u);
-  g.lineTo(62 * u, 56 * u);
-  g.lineTo(72 * u, 92 * u);
-  g.lineTo(52 * u, 88 * u);
-  g.closePath();
-  g.fill();
-
-  // Trigger guard.
-  g.strokeStyle = '#2f2a25';
-  g.lineWidth = 4 * u;
-  g.beginPath();
-  g.arc(52 * u, 58 * u, 9 * u, 0.2, Math.PI * 1.1);
-  g.stroke();
-
-  // The hand closed round it: palm, then fingers over the front of the grip.
-  g.fillStyle = '#c2741f';
-  g.beginPath();
-  g.ellipse(63 * u, 78 * u, 14 * u, 11 * u, -0.5, 0, Math.PI * 2);
-  g.fill();
-  g.fillStyle = '#d98324';
-  for (let i = 0; i < 3; i++) {
-    g.beginPath();
-    g.ellipse((52 + i * 3.4) * u, (66 + i * 7) * u, 6.5 * u, 4 * u, -0.42, 0, Math.PI * 2);
-    g.fill();
+  for (let row = 0; row < cells; row++) {
+    for (let col = 0; col < GUN_PIXELS[row].length; col++) {
+      const ink = GUN_INK[GUN_PIXELS[row][col]];
+      if (!ink) continue;
+      g.fillStyle = ink;
+      // Ceil, so neighbouring cells meet with no hairline of background.
+      g.fillRect(Math.floor(col * step), Math.floor(row * step),
+        Math.ceil(step), Math.ceil(step));
+    }
   }
-  g.strokeStyle = 'rgba(120, 66, 12, 0.5)';
-  g.lineWidth = 1.2 * u;
-  for (let i = 0; i < 3; i++) {
-    g.beginPath();
-    g.moveTo((47 + i * 3.4) * u, (63 + i * 7) * u);
-    g.lineTo((58 + i * 3.4) * u, (69 + i * 7) * u);
-    g.stroke();
-  }
-
-  // Frame and slide, running away up and to the left.
-  g.fillStyle = metal(30, 30, 30, 56, '#4b5257', '#8f979d');
-  g.beginPath();
-  g.moveTo(8 * u, 34 * u);
-  g.lineTo(58 * u, 46 * u);
-  g.lineTo(56 * u, 60 * u);
-  g.lineTo(6 * u, 46 * u);
-  g.closePath();
-  g.fill();
-
-  g.fillStyle = metal(28, 22, 28, 38, '#5c646a', '#a8b1b7');
-  g.beginPath();
-  g.moveTo(10 * u, 24 * u);
-  g.lineTo(56 * u, 36 * u);
-  g.lineTo(58 * u, 46 * u);
-  g.lineTo(8 * u, 34 * u);
-  g.closePath();
-  g.fill();
-
-  // Slide serrations, and the front sight at the muzzle.
-  g.strokeStyle = 'rgba(20, 24, 28, 0.55)';
-  g.lineWidth = 1.6 * u;
-  for (let i = 0; i < 6; i++) {
-    const x = (38 + i * 3.2) * u;
-    g.beginPath();
-    g.moveTo(x, 33 * u);
-    g.lineTo(x + 1.5 * u, 44 * u);
-    g.stroke();
-  }
-
-  g.fillStyle = '#3d4348';
-  g.fillRect(9 * u, 19 * u, 5 * u, 6 * u);       // front sight
-  g.fillStyle = '#1b1f23';
-  g.beginPath();                                  // muzzle
-  g.ellipse(9 * u, 29 * u, 3.4 * u, 5 * u, 0, 0, Math.PI * 2);
-  g.fill();
-
-  // A highlight along the top of the slide, so it reads as metal.
-  g.fillStyle = 'rgba(255, 255, 255, 0.3)';
-  g.beginPath();
-  g.moveTo(11 * u, 25 * u);
-  g.lineTo(55 * u, 37 * u);
-  g.lineTo(55 * u, 39.5 * u);
-  g.lineTo(11 * u, 27.5 * u);
-  g.closePath();
-  g.fill();
 }
 
 let gunSlab = null;
@@ -1442,10 +1546,12 @@ function drawGun(g, width, height, recoil = 0) {
   const slab = gunCanvas();
   if (!slab) return;
 
-  const size = Math.max(170, Math.min(width * 0.4, height * 0.72));
-  const kick = recoil * size * 0.09;
+  /* Sized off the shorter edge as well as the wider one, and anchored so the
+     weapon reads whole with only the forearm running off the corner. */
+  const size = Math.max(150, Math.min(width * 0.34, height * 0.62));
+  const kick = recoil * size * 0.1;
   g.drawImage(slab, 0, 0, GUN_TEX, GUN_TEX,
-    width - size * 0.88 + kick * 0.5, height - size * 0.82 + kick, size, size);
+    width - size * 0.96 + kick * 0.5, height - size * 0.96 + kick, size, size);
 }
 
 let faceSlab = null;
@@ -1545,6 +1651,10 @@ function makeTextures() {
   face.wrapT = THREE.ClampToEdgeWrapping;
   gun.wrapS = THREE.ClampToEdgeWrapping;
   gun.wrapT = THREE.ClampToEdgeWrapping;
+  // Blocky on purpose: smoothing it back out defeats the point.
+  gun.magFilter = THREE.NearestFilter;
+  gun.minFilter = THREE.NearestFilter;
+  gun.generateMipmaps = false;
 
   textures = { brick, relief, cap, floor, fur, face, gun, sky };
   return textures;
@@ -1756,6 +1866,7 @@ function mountMaze(ctx) {
     el.append(name, track);
     return {
       el,
+      label: name,
       set(fraction, dim) {
         fill.style.width = `${(Math.max(0, Math.min(1, fraction)) * 100).toFixed(1)}%`;
         el.classList.toggle('is-dim', Boolean(dim));
@@ -1766,7 +1877,8 @@ function mountMaze(ctx) {
 
   const healthBar = meter('health', 'You');
   const sprintBar = meter('sprint', 'Sprint');
-  const foeBar = meter('foe', 'Huggy');
+  const foeBar = meter('foe', 'Searching');
+  const foeLabel = foeBar.label;
 
   const hud = document.createElement('div');
   hud.className = 'hud';
@@ -1810,7 +1922,11 @@ function mountMaze(ctx) {
 
     const aimed = pickTarget(maze, walker, monsters);
     const shown = aimed || nearestMonster(monsters, walker);
-    foeBar.set(shown ? shown.health / MONSTER_HEALTH : 0, !shown || (!aimed && closeness < 0.12));
+    const hunting = monsters.some((m) => !m.dead && m.mode === 'hunt');
+    foeBar.set(shown ? shown.health / MONSTER_HEALTH : 0,
+      !shown || (!aimed && !hunting && closeness < 0.12));
+    foeBar.el.classList.toggle('is-hunting', hunting);
+    foeLabel.textContent = hunting ? 'Hunting' : 'Searching';
 
     sight.classList.toggle('is-firing', flash > 0);
     sight.classList.toggle('is-ready', shotTimer <= 0);
@@ -1842,7 +1958,7 @@ function mountMaze(ctx) {
   // page, so going fullscreen also grabs the pointer for mouse look.
   ctx.setFullscreenTarget(view);
   ctx.setTheme('maze');
-  ctx.setHint('W S walk · A D strafe · ← → turn · space sprint · click or F to shoot · ⛶ mouse look');
+  ctx.setHint('W S walk · A D strafe · space sprint (loud!) · click or F to shoot · ⛶ mouse look');
 
   function setInput(dir, down) {
     if (dir === 'up') input.forward = down;
@@ -2188,7 +2304,7 @@ function mountMaze(ctx) {
     flat = flatCanvas.getContext('2d');
     view.replaceChildren(flatCanvas, minimap, hud, sight, gameOver);
     resize();
-    ctx.setHint('W S walk · A D strafe · ← → turn · space sprint · click or F to shoot · ⛶ mouse look');
+    ctx.setHint('W S walk · A D strafe · space sprint (loud!) · click or F to shoot · ⛶ mouse look');
     ctx.setStatus(`${reason} Playing in 2D instead.`);
     loadLevel();
     start();
@@ -2213,7 +2329,7 @@ function mountMaze(ctx) {
     drive.sprint = stepSprint(sprint, input.sprint, moving, dt);
 
     stepWalker(maze, walker, drive, dt);
-    if (!dead) for (const m of monsters) stepMonster(maze, m, walker, dt);
+    if (!dead) for (const m of monsters) stepMonster(maze, m, walker, dt, { sprinting: drive.sprint });
     if (!courseDone && !dead) seconds += dt;
 
     shotTimer = Math.max(0, shotTimer - dt);
@@ -2300,7 +2416,8 @@ function mountMaze(ctx) {
     scoreRow.set('time', clock(seconds));
 
     // Proximity drone, and a footstep every so often as you cover ground.
-    if (stalker) stalker.set(dead ? 0 : near);
+    const hunted = monsters.some((m) => !m.dead && m.mode === 'hunt');
+    if (stalker) stalker.set(dead ? 0 : near * (hunted ? 1 : 0.45));
     footfall += Math.hypot(walker.x - (lastFoot.x ?? walker.x), walker.y - (lastFoot.y ?? walker.y));
     lastFoot.x = walker.x;
     lastFoot.y = walker.y;
@@ -2396,6 +2513,9 @@ function mountMaze(ctx) {
     flash = 0.07;
     recoil = 1;
     audio.play('shot');
+
+    // Loud. Everything within earshot now knows exactly where you fired from.
+    alertMonsters(monsters, walker);
 
     // Whichever of them is nearest along the line you are pointing.
     const target = pickTarget(maze, walker, monsters);
@@ -2671,6 +2791,8 @@ if (typeof module !== 'undefined') {
     makeTextures, drawCreature, createMonster, respawnMonster, spawnSpot,
     paintBrick, paintBrickNormal, paintCap, paintFloor, paintFur, paintFace, paintGun, paintSky,
     stepMonster, monsterCloseness, pickTarget, nearestMonster,
+    monsterSees, monsterHears, alertMonsters, pickSearchTarget, openCells,
+    SIGHT_RANGE, SIGHT_CONE, HEAR_WALK, HEAR_SPRINT, SHOT_NOISE, LOSE_PATIENCE,
     shotHits, clearLine, stepSprint, MAZE_PACKS,
     MONSTER_SPEED, MONSTER_MIN_START, MONSTER_REACH, MONSTER_DAMAGE, RESPAWN_MIN,
     PLAYER_HEALTH, MONSTER_HEALTH, SHOT_DAMAGE, SHOT_RANGE,

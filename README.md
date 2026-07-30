@@ -174,20 +174,39 @@ every square reachable, exactly one route between any two points, no loops.
 
 ### The thing in the maze
 
-Something else is down there, and it always knows exactly where you are. Every
-third of a second it runs the same breadth-first search the solver uses, from
-its square to yours, and walks the first step of that route. There is no line
-of sight to break and nowhere to hide.
+Something else is down there, and it does **not** know where you are. It walks
+the maze looking, and only comes after you when it has a reason to:
 
-It moves at 2.05 squares a second against your 3.1 walking and 5.9 sprinting,
-so you can outpace it — but only while the sprint bar lasts. It spawns at least
-eight squares away and never near the exit, so you are never made to walk into
-it to finish.
+- **It sees you** down an open line, within nine squares, and inside the arc it
+  is actually facing — except at arm's length, where which way it is looking
+  stops mattering. A wall between you hides you completely.
+- **It hears you** within a couple of squares at a walk. Running doubles that,
+  which is what makes the sprint bar a decision rather than a free button: it
+  gets you away and gives you away.
+- **It hears you fire.** A gunshot carries fifteen squares and tells everything
+  in earshot exactly which square you shot from.
 
-You hear it before you see it. A low drone rides under everything, getting
-louder, brighter and faster as it closes — a slow pulse at a distance, a fast
-one when it is round the corner. It shows on the minimap only once it is
-almost on top of you, so the sound is your warning, not the map.
+What it then chases is **the square it last had you in**, not wherever you
+happen to be. Break line of sight, move quietly, and it walks to where you were
+and finds nothing. Five seconds of that and it gives up and goes back to
+looking.
+
+Searching is a real sweep, not a wander. It remembers the squares it has walked
+and heads for a distant one it has not, so each leg crosses ground it has not
+seen — a minute of it covers about 40% of a medium maze while walking roughly
+that many squares, so it is barely retreading. (Preferring the *nearest*
+unvisited square sounds tidier and measured much worse: short hops mean it
+spends its time re-pathing and shuffling around one junction.)
+
+It moves at 2.05 squares a second against your 3.1 walking and 5.9 sprinting.
+It spawns at least eight squares away and never near the exit, so you are never
+made to walk into one to finish.
+
+The HUD's third gauge says which it is doing — **Searching** or **Hunting** —
+so you always know whether you have been spotted. A low drone rides under
+everything, rising as one closes, and only half as insistent while they are
+still looking. They show on the minimap only when almost on top of you, so the
+sound is your warning, not the map.
 
 ### The fight
 
@@ -241,10 +260,16 @@ otherwise, but it leaves you in fullscreen: you should not be thrown out of the
 game to restart.
 
 The gun sits in the bottom-right, sways with your stride and kicks down and
-back on every shot. It is painted onto one transparent canvas and used by both
-renderers — a plane pinned to the camera in 3D, a blit into the corner in the
-2D fallback — the same trick as the creature's face, so there is one drawing of
-it rather than two that drift apart.
+back on every shot. It is deliberately blocky: laid out on a sixteen-square
+grid as a character map, one filled square per cell, no curves and no
+gradients. Reading it off a picture rather than out of a list of drawing calls
+makes it far easier to change — to move the sight, move the S. The 3D copy uses
+nearest-neighbour filtering, since smoothing it back out would defeat the
+point.
+
+Like the creature's face it is painted onto one transparent canvas and used by
+both renderers — a plane pinned to the camera in 3D, a blit into the corner in
+the 2D fallback — so there is one drawing of it rather than two that drift.
 
 ### What it looks like
 
