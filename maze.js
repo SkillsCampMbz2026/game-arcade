@@ -10,6 +10,13 @@
    outside a browser; only mountMaze touches three.js or the DOM. */
 
 const THREE_SRC = 'vendor/three.min.js';
+const MONSTER_MODEL = 'blue_monster.glb';
+const MONSTER_HEIGHT = 1.42;     // world units, kept under the 1.5 wall height
+
+/* The model is authored with its arms straight out. Swung down at the shoulder
+   they hang like the reference picture and, more to the point, the thing then
+   fits down a one-square corridor instead of standing 1.26 units wide in it. */
+const MONSTER_SHOULDER = 1.15;   // radians
 const BRICK_TEX = 256;   // texture edge, in pixels
 const FACE_TEX = 256;    // the creature's face, likewise
 const GUN_TEX = 256;     // and the gun in your hands
@@ -262,13 +269,13 @@ const MONSTER_REACH = 0.7;       // cells; how close before it can hit you
 const MONSTER_MIN_START = 8;     // squares of head start, at least
 const RESPAWN_MIN = 14;          // and further still when it comes back
 
-/* A fight, rather than one fatal touch. Both sides have a hundred points: it
-   takes four hits from you and about four seconds of its own to finish you. */
-const PLAYER_HEALTH = 100;
-const MONSTER_HEALTH = 100;
+/* A fight, rather than one fatal touch. Six shots put one down; it needs the
+   better part of seven seconds of contact to finish you. */
+const PLAYER_HEALTH = 160;
+const MONSTER_HEALTH = 120;
 const MONSTER_DAMAGE = 24;       // per second of contact
 const HEALTH_REGEN = 3;          // per second, only once it is far off
-const SHOT_DAMAGE = 25;          // four shots to a kill
+const SHOT_DAMAGE = 20;          // six shots to a kill
 const SHOT_COOLDOWN = 0.38;      // seconds between shots
 const SHOT_RANGE = 16;           // cells
 const AIM_ASSIST = 0.055;        // radians of forgiveness either side
@@ -1571,6 +1578,40 @@ function brickSlab() {
   return flatSkin;
 }
 
+/* The monster model, fetched and prepared once for the whole page.
+
+   Resolves to null rather than rejecting when it cannot be had: opened from a
+   file:// page a fetch of a sibling file is blocked outright, and the maze has
+   to stay playable, so the caller falls back to the creature built out of
+   primitives. */
+let monsterModelLoad = null;
+
+function loadMonsterModel() {
+  if (monsterModelLoad) return monsterModelLoad;
+
+  monsterModelLoad = loadGLB(MONSTER_MODEL, {
+    pose: (name) => {
+      if (name === 'ShoulderL') return matRotateZ(MONSTER_SHOULDER);
+      if (name === 'ShoulderR') return matRotateZ(-MONSTER_SHOULDER);
+      return null;
+    },
+  }).then((model) => {
+    /* Stand it on the floor at the right height. The offset is scaled because
+       a node's position is in its parent's units, applied after its own scale
+       rather than before. */
+    const box = model.userData.bounds;
+    const scale = MONSTER_HEIGHT / (box.max[1] - box.min[1]);
+    model.scale.setScalar(scale);
+    model.position.set(
+      -((box.min[0] + box.max[0]) / 2) * scale,
+      -box.min[1] * scale,
+      -((box.min[2] + box.max[2]) / 2) * scale);
+    return model;
+  }).catch(() => null);
+
+  return monsterModelLoad;
+}
+
 /* Is WebGL usable? Answered once and remembered.
 
    The probe has to give its context straight back. A browser only allows a
@@ -1638,6 +1679,7 @@ function mountMaze(ctx) {
   let exitPillar = null;
   let exitGlow = null;
   let creatures = [];       // one group per monster, paired by index
+  let monsterModel = null;  // the supplied .glb, once it has arrived
   let pitch = 0;          // mouse look up/down, radians
   let mouseLook = false;  // only true while the pointer is locked
   let flatCanvas = null;  // the 2D fallback view, when WebGL is unavailable
@@ -1978,81 +2020,92 @@ function mountMaze(ctx) {
 
     /* The creatures — one per monster, paired by index.
 
-       Tall, shaggy blue things: a wide head with round eyes and a mouth full of
-       teeth, a bow at the throat, arms long enough to trail past their knees,
-       and big orange hands and feet. Built from primitives with a fur texture
-       over them; the only fine detail is the face, and that is one textured
-       plane rather than a mesh per tooth.
+       When the supplied model has arrived each monster wears a clone of it;
+       until then, or on a page where it cannot be fetched at all, they wear one
+       built out of primitives instead. Either way each gets its own copy of the
+       materials, so a hit flashes the one that was shot rather than the pack.
 
-       Each gets its own fur material, so being shot flashes one of them red
-       rather than the whole pack. Kept under the 1.5-unit wall height so none
-       pokes over the top of the maze and gives itself away three corridors off. */
+       Clones share materials by default in three.js, which is exactly what we
+       cannot have here. */
     creatures = monsters.map(() => {
       const group = new THREE.Group();
-      const fur = new THREE.MeshLambertMaterial({ map: skin.fur, color: 0xffffff });
-      const mitt = new THREE.MeshLambertMaterial({ color: 0xd98324 });
+      const skins = [];
 
-      const head = new THREE.Mesh(new THREE.SphereGeometry(0.29, 18, 14), fur);
-      head.position.y = 1.14;
-      head.scale.set(1.12, 1, 0.92);
-      group.add(head);
-
-      // Fur tufts, so the outline is not a clean ball.
-      for (const [tx, tz, lean] of [[-0.16, -0.02, -0.5], [0.02, 0.06, 0.1], [0.18, -0.04, 0.55]]) {
-        const tuft = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.22, 7), fur);
-        tuft.position.set(tx, 1.36, tz);
-        tuft.rotation.z = lean;
-        group.add(tuft);
-      }
-
-      // The face: eyes, lips and teeth in one texture on a plane just proud of
-      // the head. alphaTest rather than blending, so there is nothing to sort.
-      const facePlane = new THREE.Mesh(
-        new THREE.PlaneGeometry(0.52, 0.52),
-        new THREE.MeshLambertMaterial({
-          map: skin.face, transparent: true, alphaTest: 0.4, color: 0xffffff,
-        }));
-      facePlane.position.set(0, 1.13, 0.28);
-      group.add(facePlane);
-
-      const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.16, 0.46, 14), fur);
-      torso.position.y = 0.74;
-      group.add(torso);
-
-      // The bow at its throat.
-      for (const side of [-1, 1]) {
-        const loop = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.1, 8), fur);
-        loop.position.set(side * 0.07, 0.95, 0.17);
-        loop.rotation.z = side * Math.PI * 0.5;
-        group.add(loop);
-      }
-
-      for (const side of [-1, 1]) {
-        // Arms, hanging almost to the floor and swung slightly out.
-        const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.045, 0.78, 8), fur);
-        arm.position.set(side * 0.25, 0.6, 0.02);
-        arm.rotation.z = side * 0.16;
-        group.add(arm);
-
-        const hand = new THREE.Mesh(new THREE.SphereGeometry(0.075, 10, 8), mitt);
-        hand.position.set(side * 0.32, 0.22, 0.04);
-        hand.scale.set(1, 1.5, 0.8);
-        group.add(hand);
-
-        // Legs and feet.
-        const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.05, 0.56, 8), fur);
-        leg.position.set(side * 0.1, 0.29, 0);
-        group.add(leg);
-
-        const foot = new THREE.Mesh(new THREE.SphereGeometry(0.085, 10, 8), mitt);
-        foot.position.set(side * 0.1, 0.05, 0.06);
-        foot.scale.set(0.85, 0.55, 1.5);
-        group.add(foot);
+      if (monsterModel) {
+        const body = monsterModel.clone(true);
+        body.traverse((node) => {
+          if (!node.isMesh) return;
+          node.material = node.material.clone();
+          skins.push({ material: node.material, base: node.material.color.clone() });
+        });
+        group.add(body);
+      } else {
+        skins.push(...builtInCreature(group, skin));
       }
 
       scene.add(group);
-      return { group, fur };
+      return { group, skins };
     });
+  }
+
+  /* The stand-in: a shaggy blue thing made of primitives, with the face on one
+     textured plane. Used whenever the model is unavailable, and the same shape
+     the 2D fallback draws. */
+  function builtInCreature(group, skin) {
+    const fur = new THREE.MeshLambertMaterial({ map: skin.fur, color: 0xffffff });
+    const mitt = new THREE.MeshLambertMaterial({ color: 0xd98324 });
+
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.29, 18, 14), fur);
+    head.position.y = 1.14;
+    head.scale.set(1.12, 1, 0.92);
+    group.add(head);
+
+    for (const [tx, tz, lean] of [[-0.16, -0.02, -0.5], [0.02, 0.06, 0.1], [0.18, -0.04, 0.55]]) {
+      const tuft = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.22, 7), fur);
+      tuft.position.set(tx, 1.36, tz);
+      tuft.rotation.z = lean;
+      group.add(tuft);
+    }
+
+    const facePlane = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.52, 0.52),
+      new THREE.MeshLambertMaterial({
+        map: skin.face, transparent: true, alphaTest: 0.4, color: 0xffffff,
+      }));
+    facePlane.position.set(0, 1.13, 0.28);
+    group.add(facePlane);
+
+    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.16, 0.46, 14), fur);
+    torso.position.y = 0.74;
+    group.add(torso);
+
+    for (const side of [-1, 1]) {
+      const loop = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.1, 8), fur);
+      loop.position.set(side * 0.07, 0.95, 0.17);
+      loop.rotation.z = side * Math.PI * 0.5;
+      group.add(loop);
+
+      const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.045, 0.78, 8), fur);
+      arm.position.set(side * 0.25, 0.6, 0.02);
+      arm.rotation.z = side * 0.16;
+      group.add(arm);
+
+      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.075, 10, 8), mitt);
+      hand.position.set(side * 0.32, 0.22, 0.04);
+      hand.scale.set(1, 1.5, 0.8);
+      group.add(hand);
+
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.05, 0.56, 8), fur);
+      leg.position.set(side * 0.1, 0.29, 0);
+      group.add(leg);
+
+      const foot = new THREE.Mesh(new THREE.SphereGeometry(0.085, 10, 8), mitt);
+      foot.position.set(side * 0.1, 0.05, 0.06);
+      foot.scale.set(0.85, 0.55, 1.5);
+      group.add(foot);
+    }
+
+    return [{ material: fur, base: fur.color.clone() }, { material: mitt, base: mitt.color.clone() }];
   }
 
   // three.js does not free GPU buffers on its own; rebuilding a maze every
@@ -2202,7 +2255,7 @@ function mountMaze(ctx) {
     /* Each creature follows its own monster, always facing you and lurching a
        little as it walks. The lurch is offset per index so a pack does not move
        as one body. */
-    creatures.forEach(({ group, fur }, i) => {
+    creatures.forEach(({ group, skins }, i) => {
       const m = monsters[i];
       group.visible = Boolean(m) && !m.dead && !dead;
       if (!group.visible) return;
@@ -2212,8 +2265,14 @@ function mountMaze(ctx) {
       group.rotation.y = Math.atan2(walker.x - m.x, walker.y - m.y);
       group.rotation.z = Math.sin(step * 0.5) * 0.05;
 
+      // Every part of it flushes red for a moment where the round went in.
       const hit = Math.min(1, m.flinch * 4);
-      fur.color.setRGB(1, 1 - hit * 0.55, 1 - hit * 0.6);
+      for (const { material, base } of skins) {
+        material.color.setRGB(
+          base.r + (1 - base.r) * hit * 0.85,
+          base.g * (1 - hit * 0.6),
+          base.b * (1 - hit * 0.6));
+      }
     });
 
     if (gunMesh) {
@@ -2561,6 +2620,15 @@ function mountMaze(ctx) {
         }
         startRenderer();     // may still throw: a probe passing does not
         restart();           // guarantee a real context can be created
+
+        /* The model comes after the engine, and the maze is already playable
+           by the time it lands. Rebuilding the scene then is cheap and means
+           nothing has to wait on a fetch that may never succeed. */
+        loadMonsterModel().then((model) => {
+          if (destroyed || !model || !renderer || flat) return;
+          monsterModel = model;
+          buildScene();
+        });
       })
       .catch((error) => {
         if (destroyed) return;

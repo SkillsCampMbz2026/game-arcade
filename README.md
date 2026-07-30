@@ -191,7 +191,7 @@ almost on top of you, so the sound is your warning, not the map.
 
 ### The fight
 
-Both of you have a hundred points.
+You carry 160 points and each of them carries 120.
 
 - **A pack of one to five.** Pick how many are hunting you. They share the maze
   but nothing else: each has its own hundred points and works out its own route
@@ -204,9 +204,9 @@ Both of you have a hundred points.
   whether the creature is inside the cone you are pointing down and whether a
   wall is in the way. That cone widens as it gets closer, because that is how
   much of your view it actually fills, plus a sliver of forgiveness so a shot
-  that looks like it should connect does. Twenty-five points a hit, four hits
-  to a kill, and a third of a second between shots so you cannot empty a
-  magazine into it in one go.
+  that looks like it should connect does. Twenty points a hit, six hits to a
+  kill, and a third of a second between shots so you cannot empty a magazine
+  into it in one go.
   A shot picks whichever of them is nearest along the line you are pointing, so
   firing into a crowd hits the one in front.
 - **The crosshair does the aiming for you.** It closes up while the shot
@@ -215,7 +215,7 @@ Both of you have a hundred points.
   The foe bar tracks whatever you are pointing at, and the nearest one when you
   are pointing at none.
 - **It hurts you by degrees**, not all at once: twenty-four points a second
-  while it is within reach, so a little over four seconds of contact finishes
+  while it is within reach, so getting on for seven seconds of contact finishes
   you. Break away and you heal slowly — but only once it has properly lost you,
   more than eight squares off.
 - **Kill it and it comes straight back**, at least fourteen squares away with
@@ -248,16 +248,42 @@ it rather than two that drift apart.
 
 ### What it looks like
 
-Tall and shaggy and blue, with a wide grin full of teeth, round staring eyes,
-arms long enough to trail past its knees and big orange hands and feet.
+The 3D view wears `blue_monster.glb` — a supplied model, 51 meshes and 8,748
+triangles of shaggy blue thing with a grin full of teeth and big gold hands and
+feet.
 
-It is built from primitives with a fur texture over them. The only part with
-any fine detail is the face, and that is a single texture with the eyes, lips
-and two rows of teeth painted into it — mapped onto a plane on the front of the
-head in 3D, and blitted onto the silhouette in the 2D fallback, so the two
-renderers cannot drift apart. A texture is also far cheaper than a mesh per
-tooth. It takes a hit by flashing red, which is one colour change on a shared
-material rather than anything per-mesh.
+three.js ships a GLTFLoader, but only in its examples, not in the core build
+this project vendors, and pulling in another 120 KB to read one model that uses
+none of the hard parts is a poor trade. `glb.js` reads it directly: glTF 2.0,
+triangle primitives, indexed positions and UVs, node transforms, and
+pbrMetallicRoughness colours and textures. No Draco, no skins, no animation. All
+the arithmetic — chunks, accessors, the node hierarchy — is plain JavaScript
+with no three.js in it, so it can be run and checked outside a browser; three.js
+is touched only at the end, to wrap the finished arrays.
+
+Two things the reader does beyond reading:
+
+- **It merges by material.** As authored the monster is 51 separate meshes, and
+  five of them on screen would be 255 draw calls a frame for one enemy. Grouped
+  by material it comes to ten.
+- **It can pose a joint.** The model's arms are authored straight out, which at
+  1.42 units tall makes it 1.26 wide — wider than the one-square corridors it
+  has to walk down. Swinging the shoulders down 1.15 radians brings that to
+  0.79, and it hangs like the reference picture into the bargain.
+
+glTF colour factors are linear, and this renderer writes linear values straight
+out without colour management, so the reader converts them to sRGB by hand —
+taken as-is, the blue comes out nearly black.
+
+Each monster wears its own clone with its own copy of the materials: clones
+share materials in three.js by default, which would mean shooting one flashed
+the whole pack red.
+
+A page opened straight from `file://` cannot fetch a sibling file at all, so
+there the monsters wear a stand-in built out of primitives instead, with the
+face on a single texture. That is also what the 2D fallback draws, column by
+column — a .glb needs a GPU, and the fallback exists precisely for machines
+without one.
 
 ## Looks
 
@@ -309,6 +335,7 @@ Open `index.html`. That's the whole of it.
     matching.js     Matching Cards
     snake.js        Snake
     racing.js       Car Racing
+    glb.js          a small .glb reader, for the monster model
     maze.js         Escape the Maze (three.js)
     style.css       everything visual
     vendor/         three.min.js, loaded on demand
